@@ -109,6 +109,48 @@ There is no hold-to-talk RPC command, so PTT is expressed as self-mute
 toggling — with voice activity always-on underneath, the result is true
 push-to-talk.
 
+## Run at startup
+
+The daemon synthesises keystrokes and reads the foreground window, so it must
+run **in your interactive session as you** — not as a service or a Session 0
+task. Use Task Scheduler with an at-log-on trigger. Run once in PowerShell
+(point the paths at wherever you keep the exe and config):
+
+```powershell
+$exe = "C:\path\to\invisible-ptt.exe"
+$cfg = "C:\path\to\config.toml"
+$action  = New-ScheduledTaskAction -Execute $exe -Argument "`"$cfg`""
+$trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit 0
+Register-ScheduledTask -TaskName "invisible-ptt" -Action $action -Trigger $trigger -Settings $settings
+```
+
+Why these settings:
+
+- `-ExecutionTimeLimit 0` — the daemon runs indefinitely; without this the task
+  is killed after three days.
+- Runs as you, in your session — required for `SendInput`, foreground
+  detection, and writing rotated Discord tokens back to `config.toml`.
+- No elevation needed — HID++ vendor-collection access doesn't require admin.
+
+This is a console app, so the task pops a terminal window that stays open. To
+run it hidden, point the task at a one-line VBScript launcher instead — create
+`run-hidden.vbs`:
+
+```vbscript
+CreateObject("WScript.Shell").Run "cmd /c """"C:\path\to\invisible-ptt.exe"" ""C:\path\to\config.toml""""", 0, False
+```
+
+and set the action to `-Execute "wscript.exe" -Argument "`"C:\path\to\run-hidden.vbs`""`.
+The trailing `0` runs it with no window.
+
+**Simpler alternative:** drop a shortcut to the exe (with the config path as its
+argument) into `shell:startup`. It always shows a console window and won't
+restart on crash, but it needs no setup.
+
+Either way, **stop G HUB from auto-starting** too, or it'll grab the HID++
+channel and fight the daemon at logon.
+
 ## Known caveats
 
 - **Host mode disables onboard profiles.** Onboard DPI switching stops working
