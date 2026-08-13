@@ -108,3 +108,22 @@ mod imp {
 }
 
 pub use imp::{foreground_process, key};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vk_by_name_known_and_case_insensitive() {
+        assert_eq!(vk_by_name("F13"), 0x7C);
+        assert_eq!(vk_by_name("f13"), 0x7C);
+        assert_eq!(vk_by_name("PAUSE"), 0x13);
+        assert_eq!(vk_by_name("rctrl"), 0xA3);
+    }
+
+    #[test]
+    fn vk_by_name_unknown_is_zero() {
+        assert_eq!(vk_by_name("NOPE"), 0);
+        assert_eq!(vk_by_name(""), 0);
+    }
+}

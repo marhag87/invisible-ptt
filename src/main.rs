@@ -372,9 +372,16 @@ fn main() {
 }
 
 fn pick_action(rules: &[(String, Action)], default: Action) -> Action {
-    let Some(exe) = platform::foreground_process() else {
-        return default;
-    };
+    match platform::foreground_process() {
+        Some(exe) => match_action(&exe, rules, default),
+        None => default,
+    }
+}
+
+/// Match a foreground executable name against the rules: case-insensitive and
+/// exact (no substring), first hit wins, else the default. Rule keys are
+/// already lowercased when the rule list is built.
+fn match_action(exe: &str, rules: &[(String, Action)], default: Action) -> Action {
     let exe = exe.to_ascii_lowercase();
     for (proc_name, action) in rules {
         if exe == *proc_name {
@@ -382,4 +389,79 @@ fn pick_action(rules: &[(String, Action)], default: Action) -> Action {
         }
     }
     default
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_action_rpc_is_case_insensitive_and_trimmed() {
+        assert_eq!(parse_action("rpc"), Action::Rpc);
+        assert_eq!(parse_action("RPC"), Action::Rpc);
+        assert_eq!(parse_action("  Rpc  "), Action::Rpc);
+    }
+
+    #[test]
+    fn parse_action_single_char_key_uses_uppercase_vk() {
+        // Windows VKs for letters/digits are the uppercase ASCII byte.
+        assert_eq!(parse_action("key:V"), Action::Key(0x56));
+        assert_eq!(parse_action("key:v"), Action::Key(0x56));
+        assert_eq!(parse_action("key:5"), Action::Key(0x35));
+    }
+
+    #[test]
+    fn parse_action_hex_and_named_keys() {
+        assert_eq!(parse_action("key:0x13"), Action::Key(0x13));
+        assert_eq!(parse_action("key:PAUSE"), Action::Key(0x13));
+        assert_eq!(parse_action("key:F13"), Action::Key(0x7C));
+        // Whitespace inside the value is trimmed.
+        assert_eq!(parse_action("key: F13 "), Action::Key(0x7C));
+    }
+
+    #[test]
+    fn parse_action_invalid_falls_back_to_none() {
+        assert_eq!(parse_action("none"), Action::None);
+        assert_eq!(parse_action("wat"), Action::None);
+        assert_eq!(parse_action("key:"), Action::None); // empty value
+        assert_eq!(parse_action("key:0xZZ"), Action::None); // bad hex -> vk 0
+        assert_eq!(parse_action("key:NOPE"), Action::None); // unknown name -> vk 0
+    }
+
+    #[test]
+    fn match_action_is_case_insensitive_exact_first_wins() {
+        // Rule keys arrive already lowercased (see how `rules` is built).
+        let rules = vec![
+            ("chrome.exe".to_string(), Action::Key(0x56)),
+            ("cs2.exe".to_string(), Action::Rpc),
+        ];
+        // Case-insensitive on the incoming exe name.
+        assert_eq!(
+            match_action("Chrome.EXE", &rules, Action::None),
+            Action::Key(0x56)
+        );
+        assert_eq!(match_action("cs2.exe", &rules, Action::None), Action::Rpc);
+        // No rule -> default.
+        assert_eq!(
+            match_action("notepad.exe", &rules, Action::Rpc),
+            Action::Rpc
+        );
+        // Exact only: a substring must not match.
+        assert_eq!(
+            match_action("notchrome.exe", &rules, Action::None),
+            Action::None
+        );
+    }
+
+    #[test]
+    fn config_defaults() {
+        // A minimal config: only the required fields, no rules or discord.
+        let cfg: Config = toml::from_str("button = 3\nmapping = [1, 2, 3, 0, 5]\n").unwrap();
+        assert_eq!(cfg.button, 3);
+        assert_eq!(cfg.mapping, vec![1, 2, 3, 0, 5]);
+        assert_eq!(cfg.default_action, "none"); // default_action() default
+        assert!(cfg.rules.is_empty());
+        assert!(cfg.discord.client_id.is_empty());
+        assert!(cfg.discord.refresh_token.is_empty());
+    }
 }

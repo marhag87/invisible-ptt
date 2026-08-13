@@ -236,7 +236,14 @@ pub fn refresh(cfg: &crate::DiscordCfg) -> Option<(String, String)> {
         return None;
     }
 
-    let json: serde_json::Value = match serde_json::from_slice(&out.stdout) {
+    parse_refresh_response(&out.stdout)
+}
+
+/// Pull `(access_token, refresh_token)` out of Discord's token-endpoint JSON.
+/// Returns None (logging why) on malformed JSON or an error response - Discord
+/// signals failure with `{"error", "error_description"}` rather than tokens.
+fn parse_refresh_response(bytes: &[u8]) -> Option<(String, String)> {
+    let json: serde_json::Value = match serde_json::from_slice(bytes) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("discord token refresh: could not parse response: {e}");
@@ -281,4 +288,86 @@ pub fn persist_tokens(
     let tmp = format!("{config_path}.tmp");
     std::fs::write(&tmp, doc.to_string())?;
     std::fs::rename(&tmp, config_path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_refresh_response_extracts_both_tokens() {
+        let body = br#"{"access_token":"AAA","token_type":"Bearer","expires_in":604800,"refresh_token":"RRR","scope":"rpc rpc.voice.write"}"#;
+        assert_eq!(
+            parse_refresh_response(body),
+            Some(("AAA".to_string(), "RRR".to_string()))
+        );
+    }
+
+    #[test]
+    fn parse_refresh_response_rejects_error_body() {
+        // Discord's failure shape - must not be mistaken for success.
+        let body = br#"{"error":"invalid_grant","error_description":"Invalid refresh token"}"#;
+        assert_eq!(parse_refresh_response(body), None);
+    }
+
+    #[test]
+    fn parse_refresh_response_rejects_partial_and_garbage() {
+        assert_eq!(parse_refresh_response(br#"{"access_token":"AAA"}"#), None);
+        assert_eq!(parse_refresh_response(b"not json at all"), None);
+    }
+
+    fn temp_config_path(tag: u32) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "invisible-ptt-persist-{}-{tag}.toml",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn persist_tokens_rewrites_values_and_keeps_comments() {
+        let path = temp_config_path(line!());
+        let path_str = path.to_str().unwrap();
+        let original = "\
+# leading comment
+button = 3
+mapping = [1, 2, 3, 0, 5]
+
+[discord]
+# keep me
+client_id = \"cid\"
+access_token = \"old_access\"
+refresh_token = \"old_refresh\"
+";
+        std::fs::write(&path, original).unwrap();
+
+        persist_tokens(path_str, "new_access", "new_refresh").unwrap();
+
+        let result = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_file(&path).ok();
+
+        // Values updated...
+        assert!(result.contains("access_token = \"new_access\""));
+        assert!(result.contains("refresh_token = \"new_refresh\""));
+        assert!(!result.contains("old_access"));
+        assert!(!result.contains("old_refresh"));
+        // ...comments and untouched keys preserved.
+        assert!(result.contains("# leading comment"));
+        assert!(result.contains("# keep me"));
+        assert!(result.contains("client_id = \"cid\""));
+    }
+
+    #[test]
+    fn persist_tokens_inserts_missing_refresh_token_key() {
+        // First-run config that has no refresh_token line yet.
+        let path = temp_config_path(line!());
+        let path_str = path.to_str().unwrap();
+        std::fs::write(&path, "[discord]\naccess_token = \"old\"\n").unwrap();
+
+        persist_tokens(path_str, "a", "r").unwrap();
+
+        let result = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_file(&path).ok();
+        assert!(result.contains("access_token = \"a\""));
+        assert!(result.contains("refresh_token = \"r\""));
+    }
 }
