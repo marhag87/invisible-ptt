@@ -305,8 +305,11 @@ fn main() {
             Ok(None) => continue,
             Err(_) => {
                 // A read error means the device is gone; drop any stale "held"
-                // state so a stuck bitmask can't block the reconnect poll.
+                // state so a stuck bitmask can't block the reconnect poll. The
+                // release event for a button held right now will never arrive,
+                // so end the hold ourselves rather than leave it open.
                 button_state = 0;
+                release(&mut held, &mut active, &mut discord);
                 std::thread::sleep(Duration::from_millis(200));
                 continue;
             }
@@ -318,8 +321,11 @@ fn main() {
         if Some(event[2]) == dev.wireless_idx {
             eprintln!("wake event -> reasserting mouse state");
             // The wake line already announces recovery, so update state
-            // silently to keep the poll from printing "mouse back" too.
+            // silently to keep the poll from printing "mouse back" too. A hold
+            // cannot have survived the disconnect, and its release event is
+            // gone with it, so close it out here.
             button_state = 0;
+            release(&mut held, &mut active, &mut discord);
             connected = dev.apply(&cfg).is_ok();
             last_reassert = Instant::now();
             continue;
@@ -340,9 +346,9 @@ fn main() {
         if now_down == held {
             continue;
         }
-        held = now_down;
 
-        if held {
+        if now_down {
+            held = true;
             active = pick_action(&rules, default_action);
             match active {
                 Action::Key(vk) => platform::key(vk, true),
@@ -350,25 +356,34 @@ fn main() {
                 Action::None => {}
             }
         } else {
-            match active {
-                Action::Key(vk) => platform::key(vk, false),
-                Action::Rpc => discord.set_mute(true),
-                Action::None => {}
-            }
-            active = Action::None;
+            release(&mut held, &mut active, &mut discord);
         }
     }
 
     // Always give the mouse back in a usable state.
     println!("restoring mouse...");
-    if held {
-        match active {
-            Action::Key(vk) => platform::key(vk, false),
-            Action::Rpc => discord.set_mute(true),
-            Action::None => {}
-        }
-    }
+    release(&mut held, &mut active, &mut discord);
     dev.restore();
+}
+
+/// End the hold in progress, if there is one.
+///
+/// Every path out of a hold goes through here, including the two where the
+/// mouse vanishes mid-press and the release event is never coming. Those used
+/// to leave the action asserted indefinitely: a synthesised key stays logically
+/// down in Windows until its key-up arrives, and Discord keeps transmitting -
+/// a hot mic being the one failure a push-to-talk key must not have.
+fn release(held: &mut bool, active: &mut Action, discord: &mut discord::Rpc) {
+    if !*held {
+        return;
+    }
+    match *active {
+        Action::Key(vk) => platform::key(vk, false),
+        Action::Rpc => discord.set_mute(true),
+        Action::None => {}
+    }
+    *held = false;
+    *active = Action::None;
 }
 
 fn pick_action(rules: &[(String, Action)], default: Action) -> Action {
