@@ -14,10 +14,81 @@
 
 use serde_json::json;
 use std::io::{Read, Write};
+use std::sync::mpsc;
 
 const OP_HANDSHAKE: u32 = 0;
 const OP_FRAME: u32 = 1;
 
+/// Handle to the thread that owns the Discord connection.
+///
+/// Every Discord operation - opening the pipe, the handshake, AUTHENTICATE,
+/// SET_VOICE_SETTINGS - is a blocking round-trip over a pipe with no read
+/// timeout, so none of it can happen on the input loop. A Discord that accepts
+/// the connection and then stalls (mid-launch, or rate-limited) would otherwise
+/// wedge the loop: no button events, and Ctrl-C unable to restore the mouse,
+/// because the handler only flips an atomic that nobody is left to read.
+///
+/// The input loop hands over a message and moves on. Sends are queued, so the
+/// press and release of one hold stay in order.
+pub struct RpcHandle {
+    /// Dropped by shutdown() to end the worker loop.
+    tx: Option<mpsc::Sender<Msg>>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+enum Msg {
+    SetMute(bool),
+    /// New credentials after a token refresh; reconnects on the next press.
+    Reconfigure(crate::DiscordCfg),
+}
+
+impl RpcHandle {
+    pub fn spawn(cfg: &crate::DiscordCfg) -> Self {
+        let (tx, rx) = mpsc::channel::<Msg>();
+        let mut rpc = Rpc::new(cfg);
+        let worker = std::thread::spawn(move || {
+            // Ends when the sender is dropped.
+            for msg in rx {
+                match msg {
+                    Msg::SetMute(mute) => rpc.set_mute(mute),
+                    Msg::Reconfigure(cfg) => rpc = Rpc::new(&cfg),
+                }
+            }
+        });
+        RpcHandle {
+            tx: Some(tx),
+            worker: Some(worker),
+        }
+    }
+
+    pub fn set_mute(&self, mute: bool) {
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(Msg::SetMute(mute));
+        }
+    }
+
+    pub fn reconfigure(&self, cfg: &crate::DiscordCfg) {
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(Msg::Reconfigure(cfg.clone()));
+        }
+    }
+
+    /// Wait for queued messages to drain, so a final un-mute on the way out is
+    /// actually delivered rather than dying with the process.
+    ///
+    /// Call this *after* the mouse is restored: it is the one place we
+    /// deliberately block on Discord, and if Discord is wedged the mouse must
+    /// already be back in a usable state before we risk waiting on it.
+    pub fn shutdown(&mut self) {
+        self.tx = None;
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+/// The connection itself. Lives on the worker thread; reach it through
+/// [`RpcHandle`], never directly from the input loop.
 pub struct Rpc {
     cfg_client_id: String,
     cfg_token: String,
@@ -40,7 +111,7 @@ struct Conn {
 }
 
 impl Rpc {
-    pub fn new(cfg: &crate::DiscordCfg) -> Self {
+    fn new(cfg: &crate::DiscordCfg) -> Self {
         Rpc {
             cfg_client_id: cfg.client_id.clone(),
             cfg_token: cfg.access_token.clone(),
@@ -54,7 +125,7 @@ impl Rpc {
     /// Discord has no "hold to talk" RPC command, so PTT is expressed as
     /// self-mute toggling. Set Discord's input mode to Voice Activity with
     /// sensitivity at minimum, and this gives true push-to-talk semantics.
-    pub fn set_mute(&mut self, mute: bool) {
+    fn set_mute(&mut self, mute: bool) {
         if self.gave_up {
             return;
         }

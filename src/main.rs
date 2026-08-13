@@ -76,7 +76,7 @@ struct Rule {
     action: String,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Clone)]
 pub struct DiscordCfg {
     #[serde(default)]
     pub client_id: String,
@@ -263,7 +263,7 @@ fn main() {
         }
     };
 
-    let mut discord = discord::Rpc::new(&cfg.discord);
+    let mut discord = discord::RpcHandle::spawn(&cfg.discord);
     let bit: u16 = 1 << cfg.button;
     let mut held = false;
     let mut active: Action = Action::None;
@@ -297,13 +297,14 @@ fn main() {
 
     while running.load(Ordering::SeqCst) {
         // Proactive Discord token refresh for long-lived sessions. On success
-        // rebuild the RPC client so it re-authenticates with the new token.
+        // hand the new credentials to the RPC worker, which drops the current
+        // connection and re-authenticates on the next press.
         if !cfg.discord.refresh_token.is_empty() && Instant::now() >= next_refresh {
             if let Some((access, refresh)) = discord::refresh(&cfg.discord) {
                 cfg.discord.access_token = access.clone();
                 cfg.discord.refresh_token = refresh.clone();
                 let _ = discord::persist_tokens(&path, &access, &refresh);
-                discord = discord::Rpc::new(&cfg.discord);
+                discord.reconfigure(&cfg.discord);
                 println!("refreshed discord access token");
                 next_refresh = Instant::now() + refresh_window;
             } else {
@@ -358,7 +359,7 @@ fn main() {
                 // release event for a button held right now will never arrive,
                 // so end the hold ourselves rather than leave it open.
                 button_state = 0;
-                release(&mut held, &mut active, &mut discord);
+                release(&mut held, &mut active, &discord);
                 std::thread::sleep(Duration::from_millis(200));
                 continue;
             }
@@ -374,7 +375,7 @@ fn main() {
             // cannot have survived the disconnect, and its release event is
             // gone with it, so close it out here.
             button_state = 0;
-            release(&mut held, &mut active, &mut discord);
+            release(&mut held, &mut active, &discord);
             connected = dev.apply(&cfg).is_ok();
             last_reassert = Instant::now();
             continue;
@@ -405,14 +406,17 @@ fn main() {
                 Action::None => {}
             }
         } else {
-            release(&mut held, &mut active, &mut discord);
+            release(&mut held, &mut active, &discord);
         }
     }
 
     // Always give the mouse back in a usable state.
     println!("restoring mouse...");
-    release(&mut held, &mut active, &mut discord);
+    release(&mut held, &mut active, &discord);
     dev.restore(&cfg);
+    // Only now wait for that release to actually reach Discord: this is the one
+    // place we block on it, so the mouse is already restored if Discord hangs.
+    discord.shutdown();
 }
 
 /// End the hold in progress, if there is one.
@@ -422,7 +426,7 @@ fn main() {
 /// to leave the action asserted indefinitely: a synthesised key stays logically
 /// down in Windows until its key-up arrives, and Discord keeps transmitting -
 /// a hot mic being the one failure a push-to-talk key must not have.
-fn release(held: &mut bool, active: &mut Action, discord: &mut discord::Rpc) {
+fn release(held: &mut bool, active: &mut Action, discord: &discord::RpcHandle) {
     if !*held {
         return;
     }
