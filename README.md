@@ -24,13 +24,25 @@ nothing a low-level hook can observe. Your browser cannot navigate back on it,
 and a game cannot bind it, because neither is ever told it was pressed. Only
 this process knows.
 
-## Build
+## Install
+
+Download `invisible-ptt.exe` from the [latest release][latest] and put a config
+next to it — [`config.toml.example`](config.toml.example) is the template,
+saved as `config.toml`:
+
+```
+invisible-ptt.exe config.toml
+```
+
+Or build it yourself:
 
 ```
 cargo build --release
 copy config.toml.example config.toml
 target\release\invisible-ptt.exe config.toml
 ```
+
+[latest]: https://github.com/marhag87/invisible-ptt/releases/latest
 
 **Uninstall G HUB first**, or at least exit it — it holds the HID++ channel
 and will fight this program for control. Your DPI and other settings live in

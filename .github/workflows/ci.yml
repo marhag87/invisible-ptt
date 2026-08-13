@@ -8,7 +8,11 @@ name: CI
 # verified against real hardware, and it is only true for as long as something
 # keeps building it.
 on:
+  # Every branch, but naming `branches` at all is what excludes tags - without
+  # it a release tag runs this and release.yml side by side, doing the same
+  # fmt/clippy/test twice.
   push:
+    branches: ["**"]
   pull_request:
 
 # A newer push to the same ref supersedes an in-flight run.
