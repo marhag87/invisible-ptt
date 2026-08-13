@@ -151,9 +151,8 @@ impl HidPp {
                 continue;
             }
 
-            // Error page: report 0x10 with feature index 0xFF.
-            if buf[0] == REPORT_SHORT && buf[2] == 0xFF && buf[3] == out[3] {
-                return Err(Error::Device(buf[4]));
+            if let Some(code) = error_code(&buf, self.dev_index, feature_idx, out[3]) {
+                return Err(Error::Device(code));
             }
 
             let is_reply =
@@ -188,5 +187,68 @@ impl HidPp {
             return Ok(Some(buf));
         }
         Ok(None)
+    }
+}
+
+/// Recognise a HID++ 2.0 error page and pull the error code out of it.
+///
+/// The device answers a failed command with a short report carrying feature
+/// index 0xFF, followed by the request it is complaining about echoed back:
+///
+///   [2] 0xFF   [3] feature index   [4] (fn << 4) | swId   [5] error code
+///
+/// Both echoed bytes must match, or an error belonging to some other request
+/// would be reported as ours. `addr` is our own byte 3, i.e. (fn << 4) | swId.
+///
+/// Offsets per cvuchener/hidpp `Report.cpp::checkErrorMessage20`. Getting them
+/// wrong is quiet rather than loud: the error is simply never recognised and
+/// the call spins out to a timeout instead, which reads as "device did not
+/// answer" when the device in fact answered very clearly.
+fn error_code(buf: &[u8; 20], dev_index: u8, feature_idx: u8, addr: u8) -> Option<u8> {
+    (buf[0] == REPORT_SHORT
+        && buf[1] == dev_index
+        && buf[2] == 0xFF
+        && buf[3] == feature_idx
+        && buf[4] == addr)
+        .then_some(buf[5])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A short report: error page for device 1, feature index 8, function 4.
+    fn error_report() -> [u8; 20] {
+        let mut buf = [0u8; 20];
+        buf[..6].copy_from_slice(&[REPORT_SHORT, 0x01, 0xFF, 0x08, (4 << 4) | SW_ID, 0x09]);
+        buf
+    }
+
+    #[test]
+    fn error_code_reads_the_code_not_the_echoed_request() {
+        // 0x09 = the error code at byte 5, NOT byte 4 (the echoed fn|swId).
+        assert_eq!(
+            error_code(&error_report(), 0x01, 0x08, (4 << 4) | SW_ID),
+            Some(0x09)
+        );
+    }
+
+    #[test]
+    fn error_code_ignores_errors_belonging_to_another_request() {
+        let buf = error_report();
+        // Same feature, different function.
+        assert_eq!(error_code(&buf, 0x01, 0x08, (1 << 4) | SW_ID), None);
+        // Same function, different feature.
+        assert_eq!(error_code(&buf, 0x01, 0x07, (4 << 4) | SW_ID), None);
+        // Another device behind the same receiver.
+        assert_eq!(error_code(&buf, 0x02, 0x08, (4 << 4) | SW_ID), None);
+    }
+
+    #[test]
+    fn error_code_ignores_ordinary_replies() {
+        // A normal long-report reply to the same command is not an error.
+        let mut buf = [0u8; 20];
+        buf[..5].copy_from_slice(&[REPORT_LONG, 0x01, 0x08, (4 << 4) | SW_ID, 0x00]);
+        assert_eq!(error_code(&buf, 0x01, 0x08, (4 << 4) | SW_ID), None);
     }
 }
