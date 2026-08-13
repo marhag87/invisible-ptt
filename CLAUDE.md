@@ -89,8 +89,9 @@ the receiver does the same — both settings are volatile.
 - **The mapping is volatile.** The mouse forgets it on sleep/power-cycle. The
   daemon reasserts every 5s (`main.rs`, `last_reassert`). A stray
   back-navigation right after wake means that window needs shortening.
-- **Host mode disables onboard profiles.** Whether DPI survives the switch is
-  an **OPEN QUESTION** — check before assuming.
+- **Host mode disables onboard profiles.** The DPI *value* survives the switch
+  (confirmed 2026-08-13: 800 DPI before and after). Onboard DPI *switching* via a
+  DPI button is still untested — this Superlight has none, so it never came up.
 - **Discord RPC is rate-limited.** Conversation is fine; rapid tapping may
   throttle and leave the user stuck muted or open.
 - Any change to `SetMouseButtonMapping` semantics risks bricking mouse input
@@ -108,16 +109,19 @@ setup in README.md.
 
 | Thing | Status |
 |---|---|
-| `0x8110` mapping suppresses HID reports | **Confirmed on hardware** (Linux, Lightspeed) |
-| Spy still reports the disabled button | **Confirmed on hardware** |
+| `0x8110` mapping suppresses HID reports | **Confirmed on hardware** (Linux/Lightspeed, and Windows 2026-08-13 — back button does not navigate) |
+| Spy still reports the disabled button | **Confirmed on hardware** (Linux, and Windows 2026-08-13 — F13 fires from the disabled button) |
 | Builds clean on Windows | **Confirmed** — `windows` 0.58 as pinned, no source changes needed |
-| Daemon works end-to-end on Windows | **UNVERIFIED** — do not assume |
-| HID++ reachable through Windows' HID stack | **UNVERIFIED** — same protocol, different transport |
-| DPI survives Host mode | **UNKNOWN** — the one issue that could sink the design |
-| Mapping survives mouse sleep | **UNKNOWN** — daemon reasserts every 5s defensively |
+| Daemon works end-to-end on Windows | **Confirmed 2026-08-13** — `key:F13` global: button read via spy, synthesised F13, native back suppressed |
+| HID++ reachable through Windows' HID stack | **Confirmed 2026-08-13** — vendor collection opened, ROOT probe answered, spy notifications arrive |
+| DPI survives Host mode | **Confirmed 2026-08-13** — 800 DPI before and after. NB: this Superlight has no DPI-shift button, so onboard DPI *switching* is untested (and moot here); only the DPI *value* is verified to survive |
+| Recovery after mouse sleep/power-cycle | **Confirmed 2026-08-13** — mouse forgets mapping *and* spy; daemon reasserts both within ≤5s and F13 returns. Required fixing `apply()` to re-arm the spy, not just the mapping (see its doc comment) |
 
-Do not present unverified items as working. If a session starts here, the
-highest-value action is confirming the Windows path, not adding features.
+The Windows path is now verified end-to-end. Every row above was established on
+hardware — do not regress any of them to "unverified". The one soft edge left:
+there is a ≤5s window after the mouse wakes where the button navigates and the
+action is dead, before the reassert lands. Shortening `last_reassert`'s 5s
+interval in `main.rs` is the lever if that window ever needs to be tighter.
 
 ## Rejected alternatives — do not re-propose these
 

@@ -105,19 +105,26 @@ impl Device {
             profiles_idx,
         };
         dev.apply(cfg)?;
-        dev.pp.call(spy_idx, 1, &[])?; // StartMouseButtonSpy
         println!(
-            "spy started; button {} is now invisible to the OS",
+            "connected; button {} is now invisible to the OS",
             cfg.button
         );
         Ok(dev)
     }
 
-    /// Host mode + button mapping. Both are volatile - the mouse forgets them
-    /// when it sleeps or power-cycles - so this gets reasserted periodically.
+    /// Assert the full desired state: Host mode, button mapping, and the spy.
+    ///
+    /// All three are volatile - the mouse forgets them when it sleeps or
+    /// power-cycles - so this gets reasserted periodically. The spy MUST be
+    /// re-armed here, not just at connect: after a power-cycle the receiver
+    /// channel stays valid, so these writes succeed without ever triggering a
+    /// reconnect, but the mouse has dropped the spy. Re-sending the mapping
+    /// alone restores suppression while leaving the button silent - back stops
+    /// navigating, yet no notifications arrive and the action never fires.
     fn apply(&mut self, cfg: &Config) -> hidpp::Result<()> {
         self.pp.call(self.profiles_idx, 1, &[MODE_HOST])?;
         self.pp.call(self.spy_idx, 4, &cfg.mapping)?;
+        self.pp.call(self.spy_idx, 1, &[])?; // StartMouseButtonSpy
         Ok(())
     }
 
