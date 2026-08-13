@@ -231,6 +231,13 @@ fn main() {
     // Tracks reachability so the poll only logs on the transition, not every
     // failed attempt while the mouse is away.
     let mut connected = true;
+    // Full physical button bitmask from the last spy event, plus when we last
+    // saw any button activity. The reassert re-sends the button mapping, which
+    // glitches a held button into a momentary release - catastrophic mid-game
+    // (e.g. an interrupted hold-to-fire). So the reassert is deferred until no
+    // button is held AND things have been quiet briefly.
+    let mut button_state: u16 = 0;
+    let mut last_button_event = Instant::now();
     // Refresh the Discord token a day before its 7-day expiry so a daemon left
     // running for weeks never lapses. Startup already refreshed, so the first
     // one is six days out; on failure we retry within the hour.
@@ -264,7 +271,15 @@ fn main() {
         } else {
             Duration::from_secs(5)
         };
-        if last_reassert.elapsed() > interval {
+        // Only ever reassert when nothing is held and the buttons have been
+        // quiet for a moment - never in the middle of a hold or a burst of
+        // clicks. Deferring is safe: an active session keeps the mouse awake,
+        // so it hasn't forgotten anything, and the wake event covers the cases
+        // where it has.
+        if last_reassert.elapsed() > interval
+            && button_state == 0
+            && last_button_event.elapsed() > Duration::from_millis(500)
+        {
             // apply() failing means the mouse is unreachable; try a full
             // reconnect, which also covers a receiver replug (dead handle, no
             // wake event). Log only when reachability actually flips.
@@ -289,6 +304,9 @@ fn main() {
             Ok(Some(e)) => e,
             Ok(None) => continue,
             Err(_) => {
+                // A read error means the device is gone; drop any stale "held"
+                // state so a stuck bitmask can't block the reconnect poll.
+                button_state = 0;
                 std::thread::sleep(Duration::from_millis(200));
                 continue;
             }
@@ -301,6 +319,7 @@ fn main() {
             eprintln!("wake event -> reasserting mouse state");
             // The wake line already announces recovery, so update state
             // silently to keep the poll from printing "mouse back" too.
+            button_state = 0;
             connected = dev.apply(&cfg).is_ok();
             last_reassert = Instant::now();
             continue;
@@ -313,6 +332,10 @@ fn main() {
         }
 
         let state = u16::from_be_bytes([event[4], event[5]]);
+        // Remember the full button state so the reassert can stay clear of any
+        // hold, not just the PTT button.
+        button_state = state;
+        last_button_event = Instant::now();
         let now_down = state & bit != 0;
         if now_down == held {
             continue;

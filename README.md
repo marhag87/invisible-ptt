@@ -114,17 +114,19 @@ push-to-talk.
 - **Host mode disables onboard profiles.** Onboard DPI switching stops working
   while this runs. Check whether your DPI survives the switch before
   committing.
-- **The mapping is volatile.** The mouse forgets it on sleep or power-cycle.
-  The daemon reasserts every 5 seconds; if you catch a stray back-navigation
-  right after the mouse wakes, that window is why — shorten the interval.
+- **The mapping is volatile.** The mouse forgets it on sleep or power-cycle,
+  but the daemon re-applies it the moment the mouse reconnects (via the `0x1D4B`
+  wake event), so recovery is effectively instant. A slow periodic reassert runs
+  only as a backstop — and it holds off whenever a mouse button is down, so it
+  can never interrupt a hold such as hold-to-fire in a game.
 - **Discord rate-limits RPC.** Normal conversation is fine; rapid tapping may
   get throttled and leave you stuck muted or open.
 - **Feature indices are not stable.** They're resolved at runtime via the ROOT
   feature rather than hardcoded, so firmware updates shouldn't break this.
 - **This rests on reverse-engineered documentation** — cvuchener's `hidpp`
   library is the only description of `0x8110` in existence. It has been
-  confirmed working on a Superlight over the Lightspeed receiver on Linux.
-  Windows is the same protocol over a different transport, but is less tested.
+  confirmed working on a G PRO X Superlight over its Lightspeed receiver, on
+  both Linux and Windows.
 
 ## Credit
 

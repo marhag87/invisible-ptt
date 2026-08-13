@@ -86,9 +86,17 @@ the receiver does the same — both settings are volatile.
 
 - **G HUB must not be running.** It holds the HID++ channel and will fight for
   control. Settings live in onboard memory and survive uninstalling it.
-- **The mapping is volatile.** The mouse forgets it on sleep/power-cycle. The
-  daemon reasserts every 5s (`main.rs`, `last_reassert`). A stray
-  back-navigation right after wake means that window needs shortening.
+- **The mapping is volatile.** The mouse forgets it on sleep/power-cycle.
+  Recovery is driven by the `0x1D4B` wake event; the periodic poll (30s with the
+  wake event, 5s without) is only a backstop.
+- **Reassert must never fire while a button is held.** Re-sending the mapping
+  (`apply()`) glitches a physically-held button into a momentary release —
+  confirmed 2026-08-13 as interrupted hold-to-fire in games, and *only* with the
+  daemon running. The reassert is therefore gated to run solely when no button is
+  down and input has been quiet 500ms (`main.rs`, `button_state` /
+  `last_button_event`). **Do not remove that gate.** It relies on the spy
+  reporting every button's raw state, including the passthrough left button
+  (confirmed on hardware).
 - **Host mode disables onboard profiles.** The DPI *value* survives the switch
   (confirmed 2026-08-13: 800 DPI before and after). Onboard DPI *switching* via a
   DPI button is still untested — this Superlight has none, so it never came up.
@@ -126,6 +134,7 @@ user but is not yet fully verified end-to-end (see the table below).
 | Per-app `key:` rule + foreground detection | **Confirmed 2026-08-13** — `chrome.exe`→`key:V` sends V only while Chrome is focused, F13 default elsewhere. Confirms `platform::foreground_process()` returns the real exe name on Windows (was previously only known not to crash) and the case-insensitive exact-match rule logic |
 | Discord `rpc` action (mute-toggle PTT over local pipe) | **Confirmed 2026-08-13** — user runs `default_action = "rpc"`; mute-toggle PTT works over the local IPC pipe |
 | Discord token auto-refresh (7-day expiry) | **Confirmed 2026-08-13** — startup refresh mints a fresh access_token, rotates the refresh_token, and rewrites `config.toml` in place with comments intact. The ~6-day periodic refresh and the auth-error log path share this same code but were not independently triggered |
+| Reassert does not interrupt held buttons | **Confirmed 2026-08-13** — the periodic `apply()` was glitching a held left button into a brief release (interrupted hold-to-fire, daemon-only). Fixed by gating the reassert on no-button-held + 500ms quiet; verified with a 2s-interval build holding left through ~10 reasserts with zero interruptions. Also confirms the spy reports the passthrough left button |
 
 The whole path is now verified end-to-end on hardware — HID++ core, the `key:`
 and `rpc` actions, and Discord token auto-refresh. Do not regress any row to
