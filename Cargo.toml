@@ -2,6 +2,7 @@
 name = "invisible-ptt"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
 
 [dependencies]
 hidapi = "2.6"
