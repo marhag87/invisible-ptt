@@ -2,6 +2,14 @@
 
 A push-to-talk button that Windows cannot see.
 
+> [!WARNING]
+> **AI-generated code.** This project was written largely by an AI assistant.
+> It manipulates mouse firmware state over HID++ and synthesises keystrokes,
+> and parts of it are unverified on real Windows hardware. Review it yourself
+> before running it. It is provided "as is", without warranty of any kind (see
+> [LICENSE](LICENSE)); the author accepts no responsibility or liability for
+> any damage, data loss, or unexpected behaviour resulting from its use.
+
 Uses two Logitech HID++ features on a G PRO X Superlight (and likely other
 Logitech gaming mice that advertise `0x8110`):
 
