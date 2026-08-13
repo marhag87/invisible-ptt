@@ -184,9 +184,11 @@ fn main() {
     // Discord access tokens expire after 7 days. If we have the credentials to
     // refresh, do so at startup and write the rotated tokens back, so a restart
     // always begins with a valid token and no browser round-trip is needed.
+    let mut refreshed_at_startup = false;
     if let Some((access, refresh)) = discord::refresh(&cfg.discord) {
         cfg.discord.access_token = access.clone();
         cfg.discord.refresh_token = refresh.clone();
+        refreshed_at_startup = true;
         match discord::persist_tokens(&path, &access, &refresh) {
             Ok(()) => println!("refreshed discord access token"),
             Err(e) => eprintln!("warning: refreshed token but could not save it to {path}: {e}"),
@@ -239,10 +241,19 @@ fn main() {
     let mut button_state: u16 = 0;
     let mut last_button_event = Instant::now();
     // Refresh the Discord token a day before its 7-day expiry so a daemon left
-    // running for weeks never lapses. Startup already refreshed, so the first
-    // one is six days out; on failure we retry within the hour.
+    // running for weeks never lapses. A successful startup refresh puts the
+    // next one six days out; a failed one must not, because the token on disk
+    // may be nearly expired and we just learned we cannot replace it. That case
+    // is the common one, not the exotic one: the daemon is meant to run at
+    // logon, where the network is routinely not up yet.
     let refresh_window = Duration::from_secs(6 * 24 * 60 * 60);
-    let mut next_refresh = Instant::now() + refresh_window;
+    let retry_window = Duration::from_secs(60 * 60);
+    let mut next_refresh = Instant::now()
+        + if refreshed_at_startup {
+            refresh_window
+        } else {
+            retry_window
+        };
 
     println!("running - ctrl-c to stop and restore the mouse");
 
@@ -258,7 +269,7 @@ fn main() {
                 println!("refreshed discord access token");
                 next_refresh = Instant::now() + refresh_window;
             } else {
-                next_refresh = Instant::now() + Duration::from_secs(60 * 60);
+                next_refresh = Instant::now() + retry_window;
             }
         }
 
