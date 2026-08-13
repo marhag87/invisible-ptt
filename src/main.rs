@@ -90,6 +90,9 @@ struct Device {
     pp: HidPp,
     spy_idx: u8,
     profiles_idx: u8,
+    /// Feature index of WirelessDeviceStatus (0x1D4B), if the firmware has it.
+    /// Its notification means "reconnected, reconfigure me".
+    wireless_idx: Option<u8>,
 }
 
 impl Device {
@@ -97,12 +100,22 @@ impl Device {
         let mut pp = HidPp::open(api)?;
         let profiles_idx = pp.feature_index(FEAT_ONBOARD_PROFILES)?;
         let spy_idx = pp.feature_index(FEAT_MOUSE_BUTTON_SPY)?;
-        println!("onboard profiles = index {profiles_idx}, button spy = index {spy_idx}");
+        // Optional: broadcast on reconnect after sleep/power-cycle - our cue to
+        // re-apply volatile state. Firmware without it leans on the poll alone.
+        let wireless_idx = pp.feature_index(FEAT_WIRELESS_DEVICE_STATUS).ok();
+        let wake = match wireless_idx {
+            Some(i) => format!("index {i}"),
+            None => "unsupported (polling only)".to_string(),
+        };
+        println!(
+            "onboard profiles = index {profiles_idx}, button spy = index {spy_idx}, wake events = {wake}"
+        );
 
         let mut dev = Device {
             pp,
             spy_idx,
             profiles_idx,
+            wireless_idx,
         };
         dev.apply(cfg)?;
         println!(
@@ -197,19 +210,40 @@ fn main() {
     let mut held = false;
     let mut active: Action = Action::None;
     let mut last_reassert = Instant::now();
+    // Tracks reachability so the poll only logs on the transition, not every
+    // failed attempt while the mouse is away.
+    let mut connected = true;
 
     println!("running - ctrl-c to stop and restore the mouse");
 
     while running.load(Ordering::SeqCst) {
-        // Reassert periodically. If the mouse slept and forgot the mapping,
-        // the button would silently start producing real clicks again.
-        if last_reassert.elapsed() > Duration::from_secs(5) {
-            if dev.apply(&cfg).is_err() {
-                eprintln!("lost the mouse, reconnecting...");
-                if let Ok(d) = Device::connect(&api, &cfg) {
-                    dev = d;
-                }
+        // Fallback reassert. The wake event below handles the common
+        // sleep/power-cycle case immediately; this only catches sleep modes
+        // that drop volatile state without broadcasting a reconnect. Poll
+        // slowly when we have the wake event, quickly when flying blind.
+        let interval = if dev.wireless_idx.is_some() {
+            Duration::from_secs(30)
+        } else {
+            Duration::from_secs(5)
+        };
+        if last_reassert.elapsed() > interval {
+            // apply() failing means the mouse is unreachable; try a full
+            // reconnect, which also covers a receiver replug (dead handle, no
+            // wake event). Log only when reachability actually flips.
+            let ok = dev.apply(&cfg).is_ok()
+                || match Device::connect(&api, &cfg) {
+                    Ok(d) => {
+                        dev = d;
+                        true
+                    }
+                    Err(_) => false,
+                };
+            if ok && !connected {
+                eprintln!("mouse back");
+            } else if !ok && connected {
+                eprintln!("lost the mouse; waiting for it to come back...");
             }
+            connected = ok;
             last_reassert = Instant::now();
         }
 
@@ -221,6 +255,18 @@ fn main() {
                 continue;
             }
         };
+
+        // WirelessDeviceStatus broadcast: the mouse just reconnected and
+        // dropped Host mode, the mapping, and the spy. Re-arm immediately
+        // rather than waiting out the fallback poll.
+        if Some(event[2]) == dev.wireless_idx {
+            eprintln!("wake event -> reasserting mouse state");
+            // The wake line already announces recovery, so update state
+            // silently to keep the poll from printing "mouse back" too.
+            connected = dev.apply(&cfg).is_ok();
+            last_reassert = Instant::now();
+            continue;
+        }
 
         // Feature index must match the spy, and the high nibble of byte 3
         // is the event index - 0 is MouseButtonEvent.

@@ -23,6 +23,9 @@ const SW_ID: u8 = 0x0A; // any non-zero 4-bit value
 pub const FEAT_ROOT: u16 = 0x0000;
 pub const FEAT_ONBOARD_PROFILES: u16 = 0x8100;
 pub const FEAT_MOUSE_BUTTON_SPY: u16 = 0x8110;
+/// Broadcasts an event when a wireless device reconnects and its volatile
+/// state needs re-applying. Optional - not every firmware exposes it.
+pub const FEAT_WIRELESS_DEVICE_STATUS: u16 = 0x1D4B;
 
 pub const MODE_ONBOARD: u8 = 0x01;
 pub const MODE_HOST: u8 = 0x02;

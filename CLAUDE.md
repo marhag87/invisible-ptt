@@ -116,12 +116,12 @@ setup in README.md.
 | HID++ reachable through Windows' HID stack | **Confirmed 2026-08-13** — vendor collection opened, ROOT probe answered, spy notifications arrive |
 | DPI survives Host mode | **Confirmed 2026-08-13** — 800 DPI before and after. NB: this Superlight has no DPI-shift button, so onboard DPI *switching* is untested (and moot here); only the DPI *value* is verified to survive |
 | Recovery after mouse sleep/power-cycle | **Confirmed 2026-08-13** — mouse forgets mapping *and* spy; daemon reasserts both within ≤5s and F13 returns. Required fixing `apply()` to re-arm the spy, not just the mapping (see its doc comment) |
+| Wake-driven reassert via `0x1D4B` WirelessDeviceStatus | **Confirmed 2026-08-13** — feature present over the Lightspeed receiver on Windows; broadcasts on wake from **both** a power-cycle and a ~6min idle-sleep, and recovery (mapping + F13) is instant. Fires ~twice per wake; `apply()` is idempotent so the second is a harmless no-op. While the mouse is asleep the 30s fallback poll logs `lost the mouse, reconnecting...` on each failed attempt — cosmetic, since the wake event is what actually recovers |
 
-The Windows path is now verified end-to-end. Every row above was established on
-hardware — do not regress any of them to "unverified". The one soft edge left:
-there is a ≤5s window after the mouse wakes where the button navigates and the
-action is dead, before the reassert lands. Shortening `last_reassert`'s 5s
-interval in `main.rs` is the lever if that window ever needs to be tighter.
+The Windows path is fully verified end-to-end. Every row above was established
+on hardware — do not regress any of them to "unverified". With the wake event in
+place, recovery after sleep is effectively instant; the fallback poll is now
+only a backstop for states that never broadcast (e.g. a receiver replug).
 
 ## Rejected alternatives — do not re-propose these
 
