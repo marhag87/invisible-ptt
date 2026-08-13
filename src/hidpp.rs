@@ -166,7 +166,7 @@ impl HidPp {
             }
 
             // Not ours - a notification. Keep it for the main loop.
-            if (buf[3] & 0x0F) == 0 {
+            if self.is_notification(&buf) {
                 self.pending.push_back(buf);
             }
         }
@@ -183,10 +183,29 @@ impl HidPp {
         if n == 0 {
             return Ok(None);
         }
-        if (buf[3] & 0x0F) == 0 {
+        if self.is_notification(&buf) {
             return Ok(Some(buf));
         }
         Ok(None)
+    }
+
+    /// A notification addressed to us: our device index, and swId 0 (the event
+    /// index lives in the high nibble, which is what makes a notification
+    /// distinguishable from a command reply in the first place).
+    ///
+    /// The device index matters because a receiver multiplexes every device
+    /// paired to it onto one endpoint. Unfiltered, a second device's
+    /// notification that happened to carry the spy's feature index would be
+    /// read as a button mask - a phantom press from a keyboard. Moot on a
+    /// single-device Lightspeed receiver, but open() will bind to any Logitech
+    /// vendor collection, Unifying and Bolt receivers included.
+    ///
+    /// Deliberately does not require a long report: spy events are long on this
+    /// firmware, but two params would fit a short one, and rejecting short
+    /// reports here would silently break the whole daemon on firmware that
+    /// sends them that way.
+    fn is_notification(&self, buf: &[u8; 20]) -> bool {
+        buf[1] == self.dev_index && (buf[3] & 0x0F) == 0
     }
 }
 
