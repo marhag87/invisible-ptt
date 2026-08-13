@@ -40,6 +40,35 @@ fn default_action() -> String {
     "none".into()
 }
 
+/// A long HID++ frame carries 16 parameter bytes, one per button, and the spy
+/// reports button state as a 16-bit mask. Nothing here can address more.
+const MAX_BUTTONS: usize = 16;
+
+impl Config {
+    /// Reject configurations that would otherwise panic or misfire silently.
+    ///
+    /// Both of these are reachable by typo: an over-long mapping runs off the
+    /// end of the 20-byte frame in HidPp::call, and a button index past 15
+    /// overflows the `1 << button` mask - which panics in debug, and in release
+    /// quietly wraps round to hijack some entirely different button.
+    fn validate(&self) -> std::result::Result<(), String> {
+        if self.mapping.is_empty() || self.mapping.len() > MAX_BUTTONS {
+            return Err(format!(
+                "mapping has {} entries; it needs one per physical button, 1 to {MAX_BUTTONS}",
+                self.mapping.len()
+            ));
+        }
+        if usize::from(self.button) >= self.mapping.len() {
+            return Err(format!(
+                "button = {} but the mapping only covers buttons 0 to {}",
+                self.button,
+                self.mapping.len() - 1
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct Rule {
     /// Executable name, case-insensitive, e.g. "chrome.exe"
@@ -73,6 +102,9 @@ fn parse_action(s: &str) -> Action {
     if s.eq_ignore_ascii_case("rpc") {
         return Action::Rpc;
     }
+    if s.eq_ignore_ascii_case("none") || s.is_empty() {
+        return Action::None;
+    }
     if let Some(rest) = s.strip_prefix("key:") {
         let rest = rest.trim();
         let vk = if let Some(hex) = rest.strip_prefix("0x") {
@@ -87,8 +119,10 @@ fn parse_action(s: &str) -> Action {
         if vk != 0 {
             return Action::Key(vk);
         }
-        eprintln!("warning: could not parse action '{s}', treating as none");
     }
+    // Anything else is a typo. Say so: an unrecognised action is indis-
+    // tinguishable at runtime from a button that simply does nothing.
+    eprintln!("warning: could not parse action '{s}', treating as none");
     Action::None
 }
 
@@ -180,6 +214,10 @@ fn main() {
             std::process::exit(1);
         }
     };
+    if let Err(e) = cfg.validate() {
+        eprintln!("bad config: {e}");
+        std::process::exit(1);
+    }
 
     // Discord access tokens expire after 7 days. If we have the credentials to
     // refresh, do so at startup and write the rotated tokens back, so a restart
@@ -477,6 +515,34 @@ mod tests {
             match_action("notchrome.exe", &rules, Action::None),
             Action::None
         );
+    }
+
+    fn config(text: &str) -> Config {
+        toml::from_str(text).unwrap()
+    }
+
+    #[test]
+    fn validate_accepts_the_shipped_example() {
+        let cfg = config("button = 3\nmapping = [1, 2, 3, 0, 5]\n");
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_a_button_the_mapping_does_not_cover() {
+        // Would build a mask for a button that cannot be reported.
+        let cfg = config("button = 5\nmapping = [1, 2, 3, 0, 5]\n");
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_mappings_that_do_not_fit_a_frame() {
+        // 17 entries would run off the end of the 20-byte HID++ frame.
+        let long = format!("button = 0\nmapping = [{}]\n", vec!["1"; 17].join(", "));
+        assert!(config(&long).validate().is_err());
+        assert!(config("button = 0\nmapping = []\n").validate().is_err());
+        // The boundary itself is fine.
+        let full = format!("button = 15\nmapping = [{}]\n", vec!["1"; 16].join(", "));
+        assert!(config(&full).validate().is_ok());
     }
 
     #[test]
