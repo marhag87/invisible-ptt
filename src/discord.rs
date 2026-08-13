@@ -22,8 +22,13 @@ pub struct Rpc {
     cfg_client_id: String,
     cfg_token: String,
     conn: Option<Conn>,
-    /// Stop screaming into the log once we know it is not going to work.
+    /// Permanently off: RPC was never configured (no client_id). This is the
+    /// only give-up that sticks - a missing Discord *process* is transient and
+    /// must keep retrying (it may launch after us), so it does not set this.
     gave_up: bool,
+    /// Edge-trigger for the "Discord isn't running" log, so repeated presses
+    /// while it is down don't spam. Cleared once a connection succeeds.
+    warned_unavailable: bool,
     nonce: u64,
 }
 
@@ -41,6 +46,7 @@ impl Rpc {
             cfg_token: cfg.access_token.clone(),
             conn: None,
             gave_up: cfg.client_id.is_empty(),
+            warned_unavailable: false,
             nonce: 0,
         }
     }
@@ -52,10 +58,19 @@ impl Rpc {
         if self.gave_up {
             return;
         }
-        if self.conn.is_none() && self.connect().is_err() {
-            eprintln!("discord rpc unavailable; falling back to doing nothing");
-            self.gave_up = true;
-            return;
+        if self.conn.is_none() {
+            if self.connect().is_err() {
+                // Discord probably just isn't running yet - it may launch after
+                // us, especially at logon. Keep retrying on later presses, but
+                // log only on the transition so a burst of presses stays quiet.
+                if !self.warned_unavailable {
+                    eprintln!("discord rpc unavailable (is Discord running?); will retry");
+                    self.warned_unavailable = true;
+                }
+                return;
+            }
+            // Connected: re-arm the warning for a future disconnect.
+            self.warned_unavailable = false;
         }
         self.nonce += 1;
         let payload = json!({

@@ -121,7 +121,7 @@ $exe = "C:\path\to\invisible-ptt.exe"
 $cfg = "C:\path\to\config.toml"
 $action  = New-ScheduledTaskAction -Execute $exe -Argument "`"$cfg`""
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
-$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit 0
+$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit 0 -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
 Register-ScheduledTask -TaskName "invisible-ptt" -Action $action -Trigger $trigger -Settings $settings
 ```
 
@@ -129,9 +129,16 @@ Why these settings:
 
 - `-ExecutionTimeLimit 0` — the daemon runs indefinitely; without this the task
   is killed after three days.
+- `-RestartCount 3 -RestartInterval 1min` — if the mouse hasn't enumerated yet
+  when the task fires at logon, the daemon exits; this retries it a minute
+  later, giving the receiver time to come up.
 - Runs as you, in your session — required for `SendInput`, foreground
   detection, and writing rotated Discord tokens back to `config.toml`.
 - No elevation needed — HID++ vendor-collection access doesn't require admin.
+
+Discord does **not** need to be running when the daemon starts. The RPC
+connection is made lazily on first use and retried on every press, so it picks
+Discord up whenever it launches — order at logon doesn't matter.
 
 This is a console app, so the task pops a terminal window that stays open. To
 run it hidden, point the task at a one-line VBScript launcher instead — create
