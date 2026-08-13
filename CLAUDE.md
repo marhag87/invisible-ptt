@@ -139,16 +139,32 @@ user but is not yet fully verified end-to-end (see the table below).
 | Discord token auto-refresh (7-day expiry) | **Confirmed 2026-08-13** — startup refresh mints a fresh access_token, rotates the refresh_token, and rewrites `config.toml` in place with comments intact. The ~6-day periodic refresh and the auth-error log path share this same code but were not independently triggered |
 | Reassert does not interrupt held buttons | **Confirmed 2026-08-13** — the periodic `apply()` was glitching a held left button into a brief release (interrupted hold-to-fire, daemon-only). Fixed by gating the reassert on no-button-held + 500ms quiet; verified with a 2s-interval build holding left through ~10 reasserts with zero interruptions. Also confirms the spy reports the passthrough left button |
 
-### Changed since the last hardware run
+### Review changes — what has been re-verified
 
 A code review on 2026-08-13 (branch `review-fixes`) landed nine commits *after*
 the table above was filled in: HID++ error-page offsets, a device-index filter
 on notifications, releasing a held action when the mouse drops or wakes, config
 validation, `restore()` spanning the configured mapping, and Discord RPC moved
-onto a worker thread. They build clean and pass `cargo test`, but none of it has
-been re-run on the mouse. It touches the `rpc` action, the wake path, and Ctrl-C
-restore — re-check those three rows at the next hardware session rather than
-assuming they carried over.
+onto a worker thread.
+
+Re-confirmed on hardware the same day, **after** those changes:
+
+- **`rpc` action through the worker thread** — press/release still mutes and
+  unmutes; the channel hop costs nothing perceptible.
+- **Shutdown drain** — Ctrl-C *while the button is held* leaves Discord muted.
+  That release is queued rather than sent inline, so this is precisely the
+  property proving `shutdown()` drains the channel before the process exits.
+- **Ctrl-C restore after the `restore()` change** — back button navigates again.
+- **Lazy connect and retry on the worker thread** — with Discord quit, a press
+  logs `discord rpc unavailable` exactly once (edge-triggered, not per press),
+  and PTT resumes once Discord starts, with no daemon restart.
+
+Not re-checked after the changes: the **wake path** (sleep or power-cycle →
+`0x1D4B` → reassert), which now calls `release()` — a no-op unless a button was
+held across the disconnect, so low risk, but the row above was confirmed against
+the older code. The device-index filter is unobservable on a single-device
+Lightspeed receiver, and the error-page fix needs a device that actually errors
+(starting G HUB alongside the daemon will provoke one).
 
 The whole path is verified end-to-end on hardware — HID++ core, the `key:`
 and `rpc` actions, and Discord token auto-refresh. Do not regress any row to
