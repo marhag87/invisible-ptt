@@ -1,7 +1,12 @@
 name: CI
 
-# Format, lint, and test on every push and pull request. Runs on Windows to
-# exercise the same code path that ships (release.yml also builds on Windows).
+# Format, lint, and test on every push and pull request.
+#
+# Windows is what ships (release.yml builds there too). Linux is checked as
+# well because platform.rs is deliberately cfg-gated so the HID++ half builds
+# and smoke-tests on a Linux live image - that is how the protocol work gets
+# verified against real hardware, and it is only true for as long as something
+# keeps building it.
 on:
   push:
   pull_request:
@@ -13,7 +18,11 @@ concurrency:
 
 jobs:
   check:
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
@@ -21,6 +30,11 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+
+      # hidapi builds against libudev on Linux (hidraw backend).
+      - name: Install Linux HID dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
