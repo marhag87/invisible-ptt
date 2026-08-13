@@ -1,28 +1,47 @@
 # invisible-ptt
 
-A push-to-talk button that Windows cannot see.
+**A push-to-talk button that nothing else on your computer can see.**
+
+Push-to-talk needs a key you can hold down while doing something else, and on
+Windows every candidate is already taken. Bind it to a keyboard key and the
+focused application gets it too — your game reloads, your browser scrolls, your
+chat box fills up with `v`. Bind it to a mouse button and you discover Windows
+exposes only five, all of them spoken for: on a G PRO X Superlight, back and
+forward are how you navigate the web all day.
+
+This daemon removes the conflict rather than working around it. It tells the
+mouse's own firmware to stop reporting one button to the operating system
+entirely, then reads that button over a private channel only this process is
+listening on. No keystroke, no window message, nothing a low-level hook can
+intercept — as far as Windows is concerned the button was never pressed. Your
+browser doesn't navigate back, because it was never told to.
+
+And because the daemon knows which application is focused, one button can do
+different things: send the key a game expects for its own voice chat, and
+everywhere else drive Discord straight over its local pipe, where no keybind
+needs to exist at all.
 
 > [!WARNING]
 > **AI-generated code.** This project was written largely by an AI assistant.
 > It manipulates mouse firmware state over HID++ and synthesises keystrokes,
 > and it has been verified on exactly one mouse and receiver. Review it
 > yourself before running it. It is provided "as is", without warranty of any
-> kind (see
-> [LICENSE](LICENSE)); the author accepts no responsibility or liability for
-> any damage, data loss, or unexpected behaviour resulting from its use.
+> kind (see [LICENSE](LICENSE)); the author accepts no responsibility or
+> liability for any damage, data loss, or unexpected behaviour resulting from
+> its use.
 
-Uses two Logitech HID++ features on a G PRO X Superlight (and likely other
-Logitech gaming mice that advertise `0x8110`):
+## How it works
+
+Two Logitech HID++ features, on a G PRO X Superlight (and likely other Logitech
+gaming mice that advertise `0x8110`):
 
 | Feature | Use |
 |---|---|
 | `0x8100` Onboard Profiles | `SetMode(Host)` — required, or the mapping below is silently ignored |
 | `0x8110` Mouse Button Spy | `SetMouseButtonMapping` with code `0` disables a button *for standard HID reports*, while `StartMouseButtonSpy` keeps delivering its raw state as HID++ notifications |
 
-The consequence: the button produces no window message, no virtual key, and
-nothing a low-level hook can observe. Your browser cannot navigate back on it,
-and a game cannot bind it, because neither is ever told it was pressed. Only
-this process knows.
+The second row is the whole trick: the same button is invisible to the
+operating system and still legible to us, at the same time.
 
 ## Install
 
