@@ -1,0 +1,47 @@
+# invisible-ptt configuration
+#
+# Copy to config.toml next to the exe.
+
+# Spy index of the button to make invisible.
+# On the G PRO X Superlight: 0=left 1=right 2=middle 3=back 4=forward
+button = 3
+
+# Button mapping written to the mouse over HID++ 0x8110.
+# One entry per physical button, in order. 0 = invisible to the OS.
+# This disables the back button and leaves everything else alone.
+mapping = [1, 2, 3, 0, 5]
+
+# Used when the foreground executable matches no rule below.
+# "rpc" | "none" | "key:V" | "key:PAUSE" | "key:0x13"
+default_action = "rpc"
+
+# Per-application overrides, matched on executable name (case-insensitive).
+# Browsers: drive Discord over the local pipe, so no keystroke exists at all.
+[[rules]]
+process = "chrome.exe"
+action = "rpc"
+
+[[rules]]
+process = "firefox.exe"
+action = "rpc"
+
+# Games with their own voice chat: send the key that game uses for PTT.
+# The keystroke only fires while that game is focused.
+[[rules]]
+process = "cs2.exe"
+action = "key:V"
+
+[[rules]]
+process = "VALORANT-Win64-Shipping.exe"
+action = "key:V"
+
+# Leave the button doing nothing in these.
+[[rules]]
+process = "explorer.exe"
+action = "none"
+
+[discord]
+# From https://discord.com/developers/applications
+client_id = ""
+# See README for how to get this once.
+access_token = ""

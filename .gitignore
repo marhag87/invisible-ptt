@@ -1,0 +1,21 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+
+# Stray binaries copied next to the config for convenience
+*.exe
+*.pdb
+
+# Local configuration — contains Discord client_id and access_token.
+# Track config.toml.example instead.
+config.toml
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*~
+
+# Windows
+Thumbs.db
+desktop.ini
