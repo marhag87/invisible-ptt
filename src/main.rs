@@ -181,16 +181,16 @@ impl Device {
         Ok(())
     }
 
-    fn restore(&mut self) {
-        // Re-enable every button, then hand control back to the onboard profile.
-        let all: Vec<u8> = (1..=self.mapping_len()).map(|i| i as u8).collect();
+    /// Re-enable every button, then hand control back to the onboard profile.
+    ///
+    /// Spans exactly the buttons the config's mapping spans: anything we
+    /// disabled is in there by definition, and a hardcoded five would leave a
+    /// button disabled until replug on any mouse with more than five.
+    fn restore(&mut self, cfg: &Config) {
+        let all: Vec<u8> = (1..=cfg.mapping.len() as u8).collect();
         let _ = self.pp.call(self.spy_idx, 4, &all);
         let _ = self.pp.call(self.spy_idx, 2, &[]); // StopMouseButtonSpy
         let _ = self.pp.call(self.profiles_idx, 1, &[MODE_ONBOARD]);
-    }
-
-    fn mapping_len(&self) -> usize {
-        5
     }
 }
 
@@ -412,7 +412,7 @@ fn main() {
     // Always give the mouse back in a usable state.
     println!("restoring mouse...");
     release(&mut held, &mut active, &mut discord);
-    dev.restore();
+    dev.restore(&cfg);
 }
 
 /// End the hold in progress, if there is one.
