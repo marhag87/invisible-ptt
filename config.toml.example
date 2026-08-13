@@ -43,5 +43,11 @@ action = "none"
 [discord]
 # From https://discord.com/developers/applications
 client_id = ""
-# See README for how to get this once.
+client_secret = ""
+# access_token and refresh_token come from the one-time OAuth exchange (see
+# README). Access tokens expire after 7 days; with client_secret and
+# refresh_token set, the daemon mints a fresh access_token at startup and every
+# ~6 days and writes the rotated values back here - so you authorize in the
+# browser only once.
 access_token = ""
+refresh_token = ""

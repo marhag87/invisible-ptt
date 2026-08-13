@@ -90,7 +90,25 @@ impl Rpc {
                     "nonce": self.nonce.to_string(),
                 }),
             )?;
-            let _ = read_frame(&mut conn);
+            // Discord replies with evt "ERROR" and a message when the token is
+            // bad or expired. Surface it instead of sailing on silently - a
+            // lapsed token would otherwise just make PTT stop with no clue why.
+            if let Ok(reply) = read_frame(&mut conn) {
+                if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&reply) {
+                    if v.get("evt").and_then(|e| e.as_str()) == Some("ERROR") {
+                        let msg = v
+                            .get("data")
+                            .and_then(|d| d.get("message"))
+                            .and_then(|m| m.as_str())
+                            .unwrap_or("unknown error");
+                        eprintln!("discord authenticate failed: {msg}");
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::PermissionDenied,
+                            "discord rejected the access token (it may be expired)",
+                        ));
+                    }
+                }
+            }
         }
 
         self.conn = Some(conn);
@@ -153,4 +171,114 @@ fn open_pipe() -> std::io::Result<Conn> {
         }
     }
     Err(last)
+}
+
+/// Trade the refresh token for a fresh access token via Discord's OAuth2
+/// endpoint, returning `(access_token, refresh_token)` on success.
+///
+/// This shells out to `curl` (bundled with Windows 10 1803+ and 11) rather
+/// than pulling an HTTPS/TLS stack into the binary. The credentials go in over
+/// stdin, never as argv, so they do not show up in a process listing. Any
+/// failure returns None with a log line and leaves the caller's tokens as-is,
+/// so a transient network problem never clobbers a still-valid token.
+pub fn refresh(cfg: &crate::DiscordCfg) -> Option<(String, String)> {
+    use std::process::{Command, Stdio};
+
+    if cfg.client_id.is_empty() || cfg.client_secret.is_empty() || cfg.refresh_token.is_empty() {
+        return None;
+    }
+
+    // Token/id/secret are base64url / alphanumeric, so they need no form
+    // encoding. urlencoding is intentionally avoided to keep deps minimal.
+    let body = format!(
+        "grant_type=refresh_token&refresh_token={}&client_id={}&client_secret={}",
+        cfg.refresh_token, cfg.client_id, cfg.client_secret
+    );
+
+    let mut child = match Command::new("curl")
+        // --max-time so a network stall can't hang daemon startup.
+        .args([
+            "-sS",
+            "--max-time",
+            "15",
+            "-d",
+            "@-",
+            "https://discord.com/api/oauth2/token",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("discord token refresh: could not run curl: {e}");
+            return None;
+        }
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(body.as_bytes());
+        // stdin drops here, closing the pipe so curl sends the request.
+    }
+    let out = match child.wait_with_output() {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("discord token refresh: curl failed: {e}");
+            return None;
+        }
+    };
+    if !out.status.success() {
+        eprintln!(
+            "discord token refresh: curl exited {}: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+        return None;
+    }
+
+    let json: serde_json::Value = match serde_json::from_slice(&out.stdout) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("discord token refresh: could not parse response: {e}");
+            return None;
+        }
+    };
+    match (
+        json.get("access_token").and_then(|v| v.as_str()),
+        json.get("refresh_token").and_then(|v| v.as_str()),
+    ) {
+        (Some(access), Some(refresh)) => Some((access.to_string(), refresh.to_string())),
+        _ => {
+            // Discord reports failures as {"error", "error_description"}.
+            eprintln!(
+                "discord token refresh rejected: {}",
+                json.get("error_description")
+                    .or_else(|| json.get("error"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("no tokens in response")
+            );
+            None
+        }
+    }
+}
+
+/// Write the rotated tokens back into config.toml in place, preserving all
+/// comments and layout (toml_edit, not a full re-serialize). Uses a temp file
+/// plus rename so a crash mid-write cannot corrupt the config or lose the
+/// single-use refresh token.
+pub fn persist_tokens(
+    config_path: &str,
+    access_token: &str,
+    refresh_token: &str,
+) -> std::io::Result<()> {
+    let text = std::fs::read_to_string(config_path)?;
+    let mut doc = text
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    doc["discord"]["access_token"] = toml_edit::value(access_token);
+    doc["discord"]["refresh_token"] = toml_edit::value(refresh_token);
+
+    let tmp = format!("{config_path}.tmp");
+    std::fs::write(&tmp, doc.to_string())?;
+    std::fs::rename(&tmp, config_path)
 }

@@ -94,16 +94,22 @@ the receiver does the same — both settings are volatile.
   DPI button is still untested — this Superlight has none, so it never came up.
 - **Discord RPC is rate-limited.** Conversation is fine; rapid tapping may
   throttle and leave the user stuck muted or open.
+- **Discord access tokens expire after 7 days.** The daemon refreshes via the
+  OAuth refresh token: at startup and every ~6 days it POSTs
+  `grant_type=refresh_token` (shelling out to `curl`), then rewrites the rotated
+  `access_token`/`refresh_token` into `config.toml` with `toml_edit` (comments
+  preserved, temp-file + rename). Needs `client_secret` + `refresh_token` in
+  config. Refresh tokens rotate and are single-use, so a failed *persist* after a
+  successful refresh is the dangerous case — hence the atomic write.
 - Any change to `SetMouseButtonMapping` semantics risks bricking mouse input
   until replug. Always test with a second pointing device available.
 
 ## Current configuration state
 
-`config.toml` currently uses `default_action = "key:F13"` globally with all
-per-app rules commented out and no Discord credentials. So today the button
-synthesises F13 everywhere — which still leaks to the focused application. The
-per-app `rpc` rules are the intended endgame; they need the one-time OAuth
-setup in README.md.
+`config.toml` (local, gitignored) currently has `default_action = "rpc"`, a
+`chrome.exe → key:V` test rule, and real Discord credentials. The tracked
+`config.toml.example` is the template. Discord `rpc` "appears to work" per the
+user but is not yet fully verified end-to-end (see the table below).
 
 ## Project state — what is and isn't verified
 
@@ -116,12 +122,18 @@ setup in README.md.
 | HID++ reachable through Windows' HID stack | **Confirmed 2026-08-13** — vendor collection opened, ROOT probe answered, spy notifications arrive |
 | DPI survives Host mode | **Confirmed 2026-08-13** — 800 DPI before and after. NB: this Superlight has no DPI-shift button, so onboard DPI *switching* is untested (and moot here); only the DPI *value* is verified to survive |
 | Recovery after mouse sleep/power-cycle | **Confirmed 2026-08-13** — mouse forgets mapping *and* spy; daemon reasserts both within ≤5s and F13 returns. Required fixing `apply()` to re-arm the spy, not just the mapping (see its doc comment) |
-| Wake-driven reassert via `0x1D4B` WirelessDeviceStatus | **Confirmed 2026-08-13** — feature present over the Lightspeed receiver on Windows; broadcasts on wake from **both** a power-cycle and a ~6min idle-sleep, and recovery (mapping + F13) is instant. Fires ~twice per wake; `apply()` is idempotent so the second is a harmless no-op. While the mouse is asleep the 30s fallback poll logs `lost the mouse, reconnecting...` on each failed attempt — cosmetic, since the wake event is what actually recovers |
+| Wake-driven reassert via `0x1D4B` WirelessDeviceStatus | **Confirmed 2026-08-13** — feature present over the Lightspeed receiver on Windows; broadcasts on wake from **both** a power-cycle and a ~6min idle-sleep, and recovery (mapping + F13) is instant. Fires ~twice per wake; `apply()` is idempotent so the second is a harmless no-op. Reachability logging is edge-triggered (`lost the mouse; waiting for it to come back...` once on the falling edge), so a long sleep no longer spams the log |
+| Per-app `key:` rule + foreground detection | **Confirmed 2026-08-13** — `chrome.exe`→`key:V` sends V only while Chrome is focused, F13 default elsewhere. Confirms `platform::foreground_process()` returns the real exe name on Windows (was previously only known not to crash) and the case-insensitive exact-match rule logic |
+| Discord `rpc` action (mute-toggle PTT over local pipe) | **Confirmed 2026-08-13** — user runs `default_action = "rpc"`; mute-toggle PTT works over the local IPC pipe |
+| Discord token auto-refresh (7-day expiry) | **Confirmed 2026-08-13** — startup refresh mints a fresh access_token, rotates the refresh_token, and rewrites `config.toml` in place with comments intact. The ~6-day periodic refresh and the auth-error log path share this same code but were not independently triggered |
 
-The Windows path is fully verified end-to-end. Every row above was established
-on hardware — do not regress any of them to "unverified". With the wake event in
-place, recovery after sleep is effectively instant; the fallback poll is now
-only a backstop for states that never broadcast (e.g. a receiver replug).
+The whole path is now verified end-to-end on hardware — HID++ core, the `key:`
+and `rpc` actions, and Discord token auto-refresh. Do not regress any row to
+"unverified". With the wake event in place, recovery after sleep is effectively
+instant; the fallback poll is now only a backstop for states that never
+broadcast (e.g. a receiver replug). The only paths not independently triggered
+are the ~6-day periodic refresh and the auth-error log branch, which reuse the
+confirmed startup-refresh code.
 
 ## Rejected alternatives — do not re-propose these
 

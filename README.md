@@ -86,7 +86,19 @@ application is focused, it can send the key *that game* uses and nothing else.
      -d "redirect_uri=http://localhost/"
    ```
 
-5. Put `client_id` and the returned `access_token` in `config.toml`.
+5. Put `client_id`, `client_secret`, and the returned `access_token` **and
+   `refresh_token`** in `config.toml`.
+
+### Token expiry — handled automatically
+
+Discord access tokens expire after 7 days. Because `client_secret` and
+`refresh_token` are in the config, the daemon trades the refresh token for a
+fresh access token **at startup and again every ~6 days**, and writes the
+rotated values back to `config.toml` (in place, comments preserved). So you do
+the browser authorize in steps 3–4 exactly once; after that it self-heals and
+you never touch it again. The refresh uses `curl` (bundled with Windows 10
+1803+ and 11). If a refresh is ever rejected — e.g. you revoke the app — the
+daemon logs `discord authenticate failed: …` instead of silently going mute.
 
 You are allowed to authorize your *own* application without Discord
 whitelisting it; the whitelist requirement applies to shipping it to other

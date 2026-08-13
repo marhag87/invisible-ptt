@@ -52,7 +52,13 @@ pub struct DiscordCfg {
     #[serde(default)]
     pub client_id: String,
     #[serde(default)]
+    pub client_secret: String,
+    #[serde(default)]
     pub access_token: String,
+    /// Long-lived token used to mint a fresh access_token before the 7-day
+    /// expiry. Rotates on each refresh, so it is written back to config.toml.
+    #[serde(default)]
+    pub refresh_token: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -167,13 +173,25 @@ fn main() {
             std::process::exit(1);
         }
     };
-    let cfg: Config = match toml::from_str(&text) {
+    let mut cfg: Config = match toml::from_str(&text) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("bad config: {e}");
             std::process::exit(1);
         }
     };
+
+    // Discord access tokens expire after 7 days. If we have the credentials to
+    // refresh, do so at startup and write the rotated tokens back, so a restart
+    // always begins with a valid token and no browser round-trip is needed.
+    if let Some((access, refresh)) = discord::refresh(&cfg.discord) {
+        cfg.discord.access_token = access.clone();
+        cfg.discord.refresh_token = refresh.clone();
+        match discord::persist_tokens(&path, &access, &refresh) {
+            Ok(()) => println!("refreshed discord access token"),
+            Err(e) => eprintln!("warning: refreshed token but could not save it to {path}: {e}"),
+        }
+    }
 
     let default_action = parse_action(&cfg.default_action);
     let rules: Vec<(String, Action)> = cfg
@@ -213,10 +231,30 @@ fn main() {
     // Tracks reachability so the poll only logs on the transition, not every
     // failed attempt while the mouse is away.
     let mut connected = true;
+    // Refresh the Discord token a day before its 7-day expiry so a daemon left
+    // running for weeks never lapses. Startup already refreshed, so the first
+    // one is six days out; on failure we retry within the hour.
+    let refresh_window = Duration::from_secs(6 * 24 * 60 * 60);
+    let mut next_refresh = Instant::now() + refresh_window;
 
     println!("running - ctrl-c to stop and restore the mouse");
 
     while running.load(Ordering::SeqCst) {
+        // Proactive Discord token refresh for long-lived sessions. On success
+        // rebuild the RPC client so it re-authenticates with the new token.
+        if !cfg.discord.refresh_token.is_empty() && Instant::now() >= next_refresh {
+            if let Some((access, refresh)) = discord::refresh(&cfg.discord) {
+                cfg.discord.access_token = access.clone();
+                cfg.discord.refresh_token = refresh.clone();
+                let _ = discord::persist_tokens(&path, &access, &refresh);
+                discord = discord::Rpc::new(&cfg.discord);
+                println!("refreshed discord access token");
+                next_refresh = Instant::now() + refresh_window;
+            } else {
+                next_refresh = Instant::now() + Duration::from_secs(60 * 60);
+            }
+        }
+
         // Fallback reassert. The wake event below handles the common
         // sleep/power-cycle case immediately; this only catches sleep modes
         // that drop volatile state without broadcasting a reconnect. Poll
