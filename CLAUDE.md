@@ -65,7 +65,10 @@ Long report only (20 bytes):
 - `swId` is `0x0A` here. Replies echo it; **notifications carry swId 0**, with
   the event index in the high nibble. That is the only way to tell a button
   event from a command reply.
-- Errors come back as report `0x10` with feature index `0xFF`.
+- Errors come back as report `0x10` with feature index `0xFF`, followed by the
+  failing request echoed back: `[3]` feature index, `[4]` `(fn << 4) | swId`,
+  `[5]` error code. Both echoed bytes must match or you are reading someone
+  else's error; the code is at `[5]`, not `[4]`.
 - HID++ lives on a **vendor collection, usage page `0xFF00`** — not the mouse
   collection. This is precisely why it is reachable on Windows at all: Windows
   refuses to hand out mouse/keyboard collections but allows vendor ones.
@@ -136,7 +139,18 @@ user but is not yet fully verified end-to-end (see the table below).
 | Discord token auto-refresh (7-day expiry) | **Confirmed 2026-08-13** — startup refresh mints a fresh access_token, rotates the refresh_token, and rewrites `config.toml` in place with comments intact. The ~6-day periodic refresh and the auth-error log path share this same code but were not independently triggered |
 | Reassert does not interrupt held buttons | **Confirmed 2026-08-13** — the periodic `apply()` was glitching a held left button into a brief release (interrupted hold-to-fire, daemon-only). Fixed by gating the reassert on no-button-held + 500ms quiet; verified with a 2s-interval build holding left through ~10 reasserts with zero interruptions. Also confirms the spy reports the passthrough left button |
 
-The whole path is now verified end-to-end on hardware — HID++ core, the `key:`
+### Changed since the last hardware run
+
+A code review on 2026-08-13 (branch `review-fixes`) landed nine commits *after*
+the table above was filled in: HID++ error-page offsets, a device-index filter
+on notifications, releasing a held action when the mouse drops or wakes, config
+validation, `restore()` spanning the configured mapping, and Discord RPC moved
+onto a worker thread. They build clean and pass `cargo test`, but none of it has
+been re-run on the mouse. It touches the `rpc` action, the wake path, and Ctrl-C
+restore — re-check those three rows at the next hardware session rather than
+assuming they carried over.
+
+The whole path is verified end-to-end on hardware — HID++ core, the `key:`
 and `rpc` actions, and Discord token auto-refresh. Do not regress any row to
 "unverified". With the wake event in place, recovery after sleep is effectively
 instant; the fallback poll is now only a backstop for states that never
@@ -177,7 +191,13 @@ Works, but trades a ~200 ms disambiguation gesture for the conflict.
 - Dependencies are intentionally few. Do not add a HID abstraction layer.
 - `platform.rs` is cfg-gated so the HID++ half builds and smoke-tests on Linux,
   where `foreground_process()` returns `None` and `key()` just logs. Preserve
-  this — it makes hardware testing on a Linux live image possible.
+  this — it makes hardware testing on a Linux live image possible. CI builds
+  both targets so it cannot rot unnoticed.
+- **Nothing may block the input loop.** Discord RPC therefore lives on its own
+  thread behind `discord::RpcHandle`; every call into Discord is a blocking pipe
+  round-trip with no read timeout, and a stall on the loop would freeze button
+  handling *and* leave Ctrl-C unable to restore the mouse. `shutdown()` is the
+  single deliberate exception, and it runs after `dev.restore()` for that reason.
 
 ## Testing on Linux
 
