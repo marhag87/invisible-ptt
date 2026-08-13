@@ -158,13 +158,14 @@ Re-confirmed on hardware the same day, **after** those changes:
 - **Lazy connect and retry on the worker thread** — with Discord quit, a press
   logs `discord rpc unavailable` exactly once (edge-triggered, not per press),
   and PTT resumes once Discord starts, with no daemon restart.
+- **Wake path with the added `release()`** — the wake event still arrives and
+  PTT fires again afterwards.
 
-Not re-checked after the changes: the **wake path** (sleep or power-cycle →
-`0x1D4B` → reassert), which now calls `release()` — a no-op unless a button was
-held across the disconnect, so low risk, but the row above was confirmed against
-the older code. The device-index filter is unobservable on a single-device
-Lightspeed receiver, and the error-page fix needs a device that actually errors
-(starting G HUB alongside the daemon will provoke one).
+Every row in the table above therefore still holds against the current code. The
+two changes that remain unexercised cannot be reached from this setup: the
+device-index filter is unobservable on a single-device Lightspeed receiver, and
+the error-page fix needs a device that actually returns an error — G HUB would
+provoke one, but it is not installed here.
 
 The whole path is verified end-to-end on hardware — HID++ core, the `key:`
 and `rpc` actions, and Discord token auto-refresh. Do not regress any row to
