@@ -4,11 +4,9 @@
 //! system cannot see.
 //!
 //! How it works:
-//!   1. HID++ 0x8100 SetMode(Host)         - onboard profiles off, so that
-//!   2. HID++ 0x8110 SetMouseButtonMapping - code 0 disables a button for
-//!                                           standard HID reports
-//!   3. HID++ 0x8110 StartMouseButtonSpy   - raw button state still arrives
-//!                                           as HID++ notifications
+//!   1. HID++ 0x8100 SetMode(Host) turns onboard profiles off so the mapping takes effect.
+//!   2. HID++ 0x8110 SetMouseButtonMapping with code 0 disables a button for standard HID reports.
+//!   3. HID++ 0x8110 StartMouseButtonSpy delivers raw button state as HID++ notifications.
 //!
 //! The result: no window message, no virtual key, no low-level hook anywhere
 //! in Windows observes the button. Only this process knows it was pressed.
@@ -108,7 +106,10 @@ impl Device {
         };
         dev.apply(cfg)?;
         dev.pp.call(spy_idx, 1, &[])?; // StartMouseButtonSpy
-        println!("spy started; button {} is now invisible to the OS", cfg.button);
+        println!(
+            "spy started; button {} is now invisible to the OS",
+            cfg.button
+        );
         Ok(dev)
     }
 

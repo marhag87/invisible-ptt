@@ -1,0 +1,56 @@
+name: Release
+
+# Build the Windows binary and attach it to a GitHub Release
+# whenever a version tag (e.g. v0.1.0) is pushed.
+#
+# Gates, in order — any failure aborts before the exe is published:
+#   1. tag version must equal the Cargo.toml package version
+#   2. cargo fmt --check
+#   3. cargo clippy with warnings denied
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write # required for the action to create the release
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Verify tag matches Cargo.toml version
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $expected = $tag -replace '^v', ''
+          $actual = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages[0].version
+          if ($expected -ne $actual) {
+            Write-Error "Tag '$tag' (version $expected) does not match Cargo.toml version $actual"
+            exit 1
+          }
+          Write-Host "Version OK: $actual"
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --release --all-targets --locked -- -D warnings
+
+      - name: Build release
+        run: cargo build --release --locked
+
+      - name: Create release and upload exe
+        uses: softprops/action-gh-release@v2
+        with:
+          files: target/release/invisible-ptt.exe
+          generate_release_notes: true

@@ -19,6 +19,7 @@ pub const REPORT_LONG: u8 = 0x11;
 pub const REPORT_SHORT: u8 = 0x10;
 const SW_ID: u8 = 0x0A; // any non-zero 4-bit value
 
+#[allow(dead_code)] // root feature ID; its index is always 0x00 so it is never resolved
 pub const FEAT_ROOT: u16 = 0x0000;
 pub const FEAT_ONBOARD_PROFILES: u16 = 0x8100;
 pub const FEAT_MOUSE_BUTTON_SPY: u16 = 0x8110;
@@ -99,7 +100,9 @@ impl HidPp {
 
         for (path, idx) in candidates {
             let cpath = std::ffi::CString::new(path).unwrap();
-            let Ok(dev) = api.open_path(&cpath) else { continue };
+            let Ok(dev) = api.open_path(&cpath) else {
+                continue;
+            };
             let mut probe = HidPp {
                 dev,
                 dev_index: idx,
@@ -150,9 +153,8 @@ impl HidPp {
                 return Err(Error::Device(buf[4]));
             }
 
-            let is_reply = buf[1] == self.dev_index
-                && buf[2] == feature_idx
-                && (buf[3] & 0x0F) == SW_ID;
+            let is_reply =
+                buf[1] == self.dev_index && buf[2] == feature_idx && (buf[3] & 0x0F) == SW_ID;
 
             if is_reply {
                 let mut r = [0u8; 16];

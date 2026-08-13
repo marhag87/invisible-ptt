@@ -70,12 +70,7 @@ mod imp {
 
             let full = String::from_utf16_lossy(&buf[..len as usize]);
             // Keep only the executable name.
-            Some(
-                full.rsplit(['\\', '/'])
-                    .next()
-                    .unwrap_or(&full)
-                    .to_string(),
-            )
+            Some(full.rsplit(['\\', '/']).next().unwrap_or(&full).to_string())
         }
     }
 
