@@ -1,8 +1,8 @@
 ; Inno Setup script for invisible-ptt.
 ;
 ;   cargo build --release
-;   iscc /DAppVersion=0.1.0 installer\invisible-ptt.iss
-;       -> dist\invisible-ptt-0.1.0-setup.exe
+;   iscc /DAppVersion=<version> installer\invisible-ptt.iss
+;       -> dist\invisible-ptt-<version>-setup.exe
 ;
 ; Needs Inno Setup 6.3 or newer (for ArchitecturesAllowed=x64compatible). You do
 ; not need it installed locally: the Installer workflow builds this on demand,

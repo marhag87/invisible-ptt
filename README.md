@@ -85,10 +85,10 @@ setup exe it attaches. Tagging a release builds the same thing and publishes
 it. If you do have Inno Setup 6.3 or newer:
 
 ```
-iscc /DAppVersion=0.1.0 installer\invisible-ptt.iss
+iscc /DAppVersion=<version> installer\invisible-ptt.iss
 ```
 
-leaves `dist\invisible-ptt-0.1.0-setup.exe`. CI reads that version out of
+leaves `dist\invisible-ptt-<version>-setup.exe`. CI reads that version out of
 `Cargo.toml`; by hand it defaults to `0.0.0` if you leave it off.
 
 [inno]: https://jrsoftware.org/isinfo.php
