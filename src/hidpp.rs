@@ -30,6 +30,24 @@ pub const FEAT_WIRELESS_DEVICE_STATUS: u16 = 0x1D4B;
 pub const MODE_ONBOARD: u8 = 0x01;
 pub const MODE_HOST: u8 = 0x02;
 
+// Function numbers, named rather than spelled inline at the call sites. On
+// 0x8100 the getter we want sits two slots below MemoryAddrWrite (6) and
+// MemoryWrite (7): a typo'd literal there would not fail, it would write to
+// the mouse's onboard memory. Numbers per cvuchener/hidpp IOnboardProfiles.h
+// and IMouseButtonSpy.h.
+/// 0x8100 fn1 SetMode - takes MODE_HOST / MODE_ONBOARD.
+pub const FN_SET_MODE: u8 = 1;
+/// 0x8100 fn2 GetMode - no params, mode byte comes back at [0].
+pub const FN_GET_MODE: u8 = 2;
+/// 0x8110 fn1 StartMouseButtonSpy - no params.
+pub const FN_START_SPY: u8 = 1;
+/// 0x8110 fn2 StopMouseButtonSpy - no params.
+pub const FN_STOP_SPY: u8 = 2;
+/// 0x8110 fn3 GetMouseButtonMapping - no params, mapping comes back at [0..].
+pub const FN_GET_MAPPING: u8 = 3;
+/// 0x8110 fn4 SetMouseButtonMapping - one byte per physical button.
+pub const FN_SET_MAPPING: u8 = 4;
+
 #[derive(Debug)]
 pub enum Error {
     Hid(hidapi::HidError),

@@ -157,11 +157,25 @@ impl Device {
             profiles_idx,
             wireless_idx,
         };
+        // What the mouse looked like before we touched it, for the log.
+        match dev.probe(cfg) {
+            Ok(p) => println!("mouse was: {}", p.describe()),
+            Err(e) => eprintln!("warning: could not read the mouse state: {e}"),
+        }
         dev.apply(cfg)?;
         println!(
             "connected; button {} is now invisible to the OS",
             cfg.button
         );
+        // Say that only once it is true. apply() returning Ok means the mouse
+        // acknowledged three writes, not that they took effect - Host mode in
+        // particular is what stops an onboard profile from quietly overriding
+        // the mapping, and its absence looks identical from the write side.
+        match dev.probe(cfg) {
+            Ok(p) if p.matches(&cfg.mapping) => {}
+            Ok(p) => eprintln!("warning: the mouse did not take it: {}", p.describe()),
+            Err(e) => eprintln!("warning: could not confirm the mouse state: {e}"),
+        }
         Ok(dev)
     }
 
@@ -175,10 +189,35 @@ impl Device {
     /// alone restores suppression while leaving the button silent - back stops
     /// navigating, yet no notifications arrive and the action never fires.
     fn apply(&mut self, cfg: &Config) -> hidpp::Result<()> {
-        self.pp.call(self.profiles_idx, 1, &[MODE_HOST])?;
-        self.pp.call(self.spy_idx, 4, &cfg.mapping)?;
-        self.pp.call(self.spy_idx, 1, &[])?; // StartMouseButtonSpy
+        self.pp.call(self.profiles_idx, FN_SET_MODE, &[MODE_HOST])?;
+        self.pp.call(self.spy_idx, FN_SET_MAPPING, &cfg.mapping)?;
+        self.pp.call(self.spy_idx, FN_START_SPY, &[])?;
         Ok(())
+    }
+
+    /// Read back the state `apply()` asserts, writing nothing.
+    ///
+    /// Two zero-parameter getters: 0x8100 fn2 GetMode and 0x8110 fn3
+    /// GetMouseButtonMapping. Being reads they cannot glitch a held button the
+    /// way re-sending the mapping does, which is why the periodic check runs
+    /// through here and only writes when this says the mouse has drifted.
+    ///
+    /// The spy is a gap: IMouseButtonSpy stops at fn4, so whether it is still
+    /// armed cannot be read. The mapping stands in for it. Confirmed
+    /// 2026-08-14: a sleep leaves the mouse in Onboard mode with the factory
+    /// mapping, i.e. the reset that drops the spy also drops both readable
+    /// pieces, so there is no observed state where the spy is gone and this
+    /// still reports a match.
+    fn probe(&mut self, cfg: &Config) -> hidpp::Result<Probe> {
+        let mode = self.pp.call(self.profiles_idx, FN_GET_MODE, &[])?[0];
+        let mapping = self.pp.call(self.spy_idx, FN_GET_MAPPING, &[])?;
+        // Compare only the span the config covers, for the same reason
+        // restore() writes only that span: bytes past the last physical button
+        // are whatever the firmware feels like returning.
+        Ok(Probe {
+            mode,
+            mapping: mapping[..cfg.mapping.len()].to_vec(),
+        })
     }
 
     /// Re-enable every button, then hand control back to the onboard profile.
@@ -188,9 +227,41 @@ impl Device {
     /// button disabled until replug on any mouse with more than five.
     fn restore(&mut self, cfg: &Config) {
         let all: Vec<u8> = (1..=cfg.mapping.len() as u8).collect();
-        let _ = self.pp.call(self.spy_idx, 4, &all);
-        let _ = self.pp.call(self.spy_idx, 2, &[]); // StopMouseButtonSpy
-        let _ = self.pp.call(self.profiles_idx, 1, &[MODE_ONBOARD]);
+        let _ = self.pp.call(self.spy_idx, FN_SET_MAPPING, &all);
+        let _ = self.pp.call(self.spy_idx, FN_STOP_SPY, &[]);
+        let _ = self
+            .pp
+            .call(self.profiles_idx, FN_SET_MODE, &[MODE_ONBOARD]);
+    }
+}
+
+/// What the mouse reports its own state to be. See `Device::probe`.
+struct Probe {
+    mode: u8,
+    mapping: Vec<u8>,
+}
+
+impl Probe {
+    /// True when the mouse is already in the state `apply()` would assert -
+    /// except for the spy, which cannot be read back at all.
+    fn matches(&self, mapping: &[u8]) -> bool {
+        self.mode == MODE_HOST && self.mapping == mapping
+    }
+
+    /// One line for the log.
+    fn describe(&self) -> String {
+        let mode = match self.mode {
+            MODE_HOST => "host",
+            MODE_ONBOARD => "onboard",
+            _ => "?",
+        };
+        let map = self
+            .mapping
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        format!("mode={:02x} ({mode}), mapping=[{map}]", self.mode)
     }
 }
 
@@ -267,15 +338,15 @@ fn main() {
     let bit: u16 = 1 << cfg.button;
     let mut held = false;
     let mut active: Action = Action::None;
-    let mut last_reassert = Instant::now();
+    let mut last_poll = Instant::now();
     // Tracks reachability so the poll only logs on the transition, not every
     // failed attempt while the mouse is away.
     let mut connected = true;
     // Full physical button bitmask from the last spy event, plus when we last
-    // saw any button activity. The reassert re-sends the button mapping, which
-    // glitches a held button into a momentary release - catastrophic mid-game
-    // (e.g. an interrupted hold-to-fire). So the reassert is deferred until no
-    // button is held AND things have been quiet briefly.
+    // saw any button activity. Re-sending the button mapping glitches a held
+    // button into a momentary release - catastrophic mid-game (e.g. an
+    // interrupted hold-to-fire). So any write is deferred until no button is
+    // held AND things have been quiet briefly.
     let mut button_state: u16 = 0;
     let mut last_button_event = Instant::now();
     // Refresh the Discord token a day before its 7-day expiry so a daemon left
@@ -312,7 +383,7 @@ fn main() {
             }
         }
 
-        // Fallback reassert. The wake event below handles the common
+        // Fallback check. The wake event below handles the common
         // sleep/power-cycle case immediately; this only catches sleep modes
         // that drop volatile state without broadcasting a reconnect. Poll
         // slowly when we have the wake event, quickly when flying blind.
@@ -321,33 +392,56 @@ fn main() {
         } else {
             Duration::from_secs(5)
         };
-        // Only ever reassert when nothing is held and the buttons have been
-        // quiet for a moment - never in the middle of a hold or a burst of
-        // clicks. Deferring is safe: an active session keeps the mouse awake,
-        // so it hasn't forgotten anything, and the wake event covers the cases
-        // where it has.
-        if last_reassert.elapsed() > interval
+        // Only ever write when nothing is held and the buttons have been quiet
+        // for a moment - never in the middle of a hold or a burst of clicks.
+        // Deferring is safe: an active session keeps the mouse awake, so it
+        // hasn't forgotten anything, and the wake event covers the cases where
+        // it has.
+        if last_poll.elapsed() > interval
             && button_state == 0
             && last_button_event.elapsed() > Duration::from_millis(500)
         {
-            // apply() failing means the mouse is unreachable; try a full
-            // reconnect, which also covers a receiver replug (dead handle, no
-            // wake event). Log only when reachability actually flips.
-            let ok = dev.apply(&cfg).is_ok()
-                || match Device::connect(&api, &cfg) {
-                    Ok(d) => {
-                        dev = d;
-                        true
+            last_poll = Instant::now();
+            // Read before writing. In steady state the mouse still holds
+            // everything we asked for, so this writes nothing at all - which is
+            // the point. The gate above is checked before apply() sends its
+            // three round-trips, so a button going down in between still gets
+            // its mapping rewritten underneath it; the only way to make that
+            // race vanish is to stop doing the write. What is left fires solely
+            // when the mouse has reset itself, and a mouse that has reset was
+            // asleep, so nothing can be held.
+            //
+            // Skipped while the mouse is unreachable: there is nothing to read
+            // there, and the reconnect below is what that state needs anyway.
+            let fresh = connected
+                && match dev.probe(&cfg) {
+                    Ok(p) if p.matches(&cfg.mapping) => true,
+                    Ok(p) => {
+                        eprintln!("mouse forgot its configuration ({})", p.describe());
+                        false
                     }
+                    // Unreadable means unreachable, which the reconnect handles.
                     Err(_) => false,
                 };
-            if ok && !connected {
-                eprintln!("mouse back");
-            } else if !ok && connected {
-                eprintln!("lost the mouse; waiting for it to come back...");
+            if !fresh {
+                // apply() failing means the mouse is unreachable; try a full
+                // reconnect, which also covers a receiver replug (dead handle,
+                // no wake event). Log only when reachability actually flips.
+                let ok = dev.apply(&cfg).is_ok()
+                    || match Device::connect(&api, &cfg) {
+                        Ok(d) => {
+                            dev = d;
+                            true
+                        }
+                        Err(_) => false,
+                    };
+                if ok && !connected {
+                    eprintln!("mouse back");
+                } else if !ok && connected {
+                    eprintln!("lost the mouse; waiting for it to come back...");
+                }
+                connected = ok;
             }
-            connected = ok;
-            last_reassert = Instant::now();
         }
 
         let event = match dev.pp.next_event(100) {
@@ -376,8 +470,15 @@ fn main() {
             // gone with it, so close it out here.
             button_state = 0;
             release(&mut held, &mut active, &discord);
+            // Deliberately does not probe first. The mouse has just come back
+            // from a state that drops everything, so the read would only cost
+            // two round-trips to confirm what we already know, and recovery
+            // here is meant to be instant. Nothing can be held across a
+            // disconnect either, so the write is free of the race the poll
+            // avoids. The duplicate broadcast makes this run twice; apply() is
+            // idempotent.
             connected = dev.apply(&cfg).is_ok();
-            last_reassert = Instant::now();
+            last_poll = Instant::now();
             continue;
         }
 
@@ -462,6 +563,31 @@ fn match_action(exe: &str, rules: &[(String, Action)], default: Action) -> Actio
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn probe(mode: u8, mapping: &[u8]) -> Probe {
+        Probe {
+            mode,
+            mapping: mapping.to_vec(),
+        }
+    }
+
+    #[test]
+    fn probe_matches_only_in_host_mode_with_the_configured_mapping() {
+        let want = [1, 2, 3, 0, 5];
+        assert!(probe(MODE_HOST, &want).matches(&want));
+        // Host mode with the mapping forgotten: back navigates again.
+        assert!(!probe(MODE_HOST, &[1, 2, 3, 4, 5]).matches(&want));
+        // Mapping intact but onboard profiles back in charge, which silently
+        // overrides it - the state that made SetMode mandatory in the first place.
+        assert!(!probe(MODE_ONBOARD, &want).matches(&want));
+    }
+
+    #[test]
+    fn probe_notices_a_button_other_than_the_ptt_one() {
+        // Divergence anywhere in the span counts: a mapping we did not write is
+        // a mapping the mouse has reset, whichever byte gives it away.
+        assert!(!probe(MODE_HOST, &[1, 2, 3, 0, 0]).matches(&[1, 2, 3, 0, 5]));
+    }
 
     #[test]
     fn parse_action_rpc_is_case_insensitive_and_trimmed() {
