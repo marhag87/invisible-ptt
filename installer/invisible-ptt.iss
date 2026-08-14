@@ -61,12 +61,15 @@ Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
 
-; Let the Restart Manager close a running copy, for installing over one and for
-; uninstalling. It is safe to do so *only* because the tray window treats
-; WM_CLOSE and WM_QUERYENDSESSION as "stop the daemon" rather than "destroy the
-; window" (see wndproc in src/tray.rs). Under the default handling those
-; messages would kill the tray thread alone and leave the input loop running
-; with no icon and a mouse button still withheld from Windows.
+; Let the Restart Manager close a running copy when installing over one. This
+; covers Setup only - the uninstaller does not consult it, which is what
+; InitializeUninstall in [Code] is for.
+;
+; Either way it is safe *only* because the tray window treats WM_CLOSE and
+; WM_QUERYENDSESSION as "stop the daemon" rather than "destroy the window" (see
+; wndproc in src/tray.rs). Under the default handling those messages would kill
+; the tray thread alone and leave the input loop running with no icon and a
+; mouse button still withheld from Windows.
 ;
 ; RestartApplications=no: bringing the daemon back up afterwards is the Run
 ; key's job if the user asked for it, and silently restarting a program that is
@@ -105,19 +108,67 @@ Filename: "{app}\{#ExeName}"; Description: "Start {#AppName} now"; \
 
 [Code]
 
-{ A last resort, for the case the Restart Manager did not spot the running copy
-  - it finds a process by the files it has open, so a portable exe started from
-  somewhere else would slip past it. Killing that process is not an option: only
-  an orderly stop hands the mouse button back to Windows, so ask, and keep
-  asking. }
-function ConfirmClosed(const Reason: String): Boolean;
+const
+  WM_CLOSE = $0010;
+
+function PostMessage(hWnd: Integer; Msg: Cardinal; wParam: Integer;
+  lParam: Integer): Boolean;
+  external 'PostMessageW@user32.dll stdcall';
+
+function TrayWindow: Integer;
 begin
-  while FindWindowByClassName('{#TrayClass}') <> 0 do
+  Result := FindWindowByClassName('{#TrayClass}');
+end;
+
+{ Ask a running daemon to stop, and wait until it has.
+
+  Killing it is not an option: an uninstall that leaves the mouse mid-mapping
+  takes the only program that can undo it with it, and the button stays dead
+  until the mouse power-cycles. But it does not need killing - the tray window
+  reads WM_CLOSE as "stop the daemon" (see wndproc in src/tray.rs), which is
+  the same path as the Exit menu item, so it restores the mouse on the way out.
+
+  The wait is for the window to disappear, which the tray does only after the
+  input loop has finished with the mouse, plus a moment for the process to go
+  and release the exe. False if it is still there after ten seconds. }
+function StopDaemon: Boolean;
+var
+  Wnd, I: Integer;
+  Sent: Boolean;
+begin
+  Wnd := TrayWindow;
+  if Wnd = 0 then
   begin
-    if MsgBox(Reason + #13#10#13#10 +
-              'Right-click the {#AppName} icon in the notification area and ' +
-              'choose Exit, then click Retry. Exit is also what hands your ' +
-              'mouse button back to Windows.',
+    Result := True;
+    Exit;
+  end;
+
+  Sent := PostMessage(Wnd, WM_CLOSE, 0, 0);
+  if Sent then
+    for I := 1 to 100 do
+    begin
+      if TrayWindow = 0 then
+      begin
+        Sleep(250);
+        Result := True;
+        Exit;
+      end;
+      Sleep(100);
+    end;
+
+  Result := False;
+end;
+
+{ The fallback, for a daemon that did not answer - one whose tray window never
+  came up, say, so there is nothing to post to. Ask, and keep asking. }
+function EnsureStopped(const Reason: String): Boolean;
+begin
+  while not StopDaemon do
+  begin
+    if MsgBox(Reason + #13#10#13#10
+              + 'Right-click the {#AppName} icon in the notification area and '
+              + 'choose Exit, then click Retry. Exit is also what hands your '
+              + 'mouse button back to Windows.',
               mbConfirmation, MB_RETRYCANCEL) = IDCANCEL then
     begin
       Result := False;
@@ -129,11 +180,19 @@ end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
-  if ConfirmClosed('{#AppName} is still running, and Setup cannot replace a ' +
-                   'program while it is in use.') then
+  if EnsureStopped('{#AppName} is still running, and Setup cannot replace a '
+                   + 'program while it is in use.') then
     Result := ''
   else
     Result := '{#AppName} is still running.';
+end;
+
+{ CloseApplications is a Setup directive; the uninstaller never consults it, so
+  without this an uninstall would happily run with the daemon still up. }
+function InitializeUninstall: Boolean;
+begin
+  Result := EnsureStopped('{#AppName} is running and did not respond to a '
+                          + 'request to close.');
 end;
 
 procedure CurUninstallStepChanged(CurStep: TUninstallStep);

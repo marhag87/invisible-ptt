@@ -289,7 +289,7 @@ const STARTER: &str = include_str!("../config.toml.starter");
 /// Where the config lives, in order of precedence:
 ///
 ///   1. the path given on the command line - explicit always wins, which is
-///      what existing scheduled tasks and `cargo run` pass;
+///      what the tray's sign-in entry and `cargo run` pass;
 ///   2. `config.toml` beside the executable, *if it already exists* - a
 ///      portable install, and what every install before this one looked like;
 ///   3. `%APPDATA%\invisible-ptt\config.toml`, created on first run.

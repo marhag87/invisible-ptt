@@ -47,8 +47,12 @@ operating system and still legible to us, at the same time.
 
 Download `invisible-ptt-setup.exe` from the [latest release][latest] and run
 it. It installs for you alone — no administrator prompt — and offers a tick box
-for starting at sign-in, the same one the tray menu toggles later. Uninstalling
-asks before it deletes your settings.
+for starting at sign-in, the same one the tray menu toggles later.
+
+Uninstalling closes a running copy first, which is what hands your mouse button
+back to Windows — so it is safe to uninstall without quitting the daemon. It
+asks before deleting your settings, and keeping them is the default, since they
+include your Discord credentials.
 
 Or take the bare `invisible-ptt.exe` from the same release and run it from
 wherever you like; nothing about the program needs installing:
@@ -196,8 +200,9 @@ session as you** — required, because it synthesises keystrokes and reads the
 foreground window, neither of which works from a service or a Session 0 task.
 No elevation needed: HID++ vendor-collection access doesn't require admin.
 
-Untick it to remove the entry. Move the exe and you must re-tick it, since the
-path is baked in.
+The installer's tick box writes the same entry, so either route gets you there
+and the tray tick tells you which state you are in. Untick it to remove the
+entry. Move the exe and you must re-tick it, since the path is baked in.
 
 Discord does **not** need to be running when the daemon starts. The RPC
 connection is made lazily on first use and retried on every press, so it picks
@@ -209,31 +214,6 @@ fight the daemon at sign-in.
 The receiver often hasn't enumerated yet when the Run key fires. That's fine —
 the daemon waits for the mouse rather than giving up, and the icon is there the
 whole time.
-
-### Or: Task Scheduler
-
-The one thing the Run key can't do is start the daemon again if it crashes.
-Run once in PowerShell (point the paths at wherever you keep the exe and
-config):
-
-```powershell
-$exe = "C:\path\to\invisible-ptt.exe"
-$cfg = "C:\path\to\config.toml"
-$action  = New-ScheduledTaskAction -Execute $exe -Argument "`"$cfg`""
-$trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
-$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit 0 -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
-Register-ScheduledTask -TaskName "invisible-ptt" -Action $action -Trigger $trigger -Settings $settings
-```
-
-Why these settings:
-
-- `-ExecutionTimeLimit 0` — the daemon runs indefinitely; without this the task
-  is killed after three days.
-- `-RestartCount 3 -RestartInterval 1min` — brings it back if it dies.
-- Runs as you, in your session — required for `SendInput`, foreground
-  detection, and writing rotated Discord tokens back to `config.toml`.
-
-Untick the tray toggle if you use this, or both will start a copy.
 
 ## Known caveats
 
