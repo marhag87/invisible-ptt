@@ -55,8 +55,16 @@ jobs:
       - name: Build release
         run: cargo build --release --locked
 
+      # Both artifacts ship: the installer for the normal case, the bare exe
+      # for a portable install. See installer.yml to build one on demand.
+      - name: Build installer
+        id: installer
+        uses: ./.github/actions/build-installer
+
       - name: Create release and upload exe
         uses: softprops/action-gh-release@v3
         with:
-          files: target/release/invisible-ptt.exe
+          files: |
+            target/release/invisible-ptt.exe
+            ${{ steps.installer.outputs.path }}
           generate_release_notes: true

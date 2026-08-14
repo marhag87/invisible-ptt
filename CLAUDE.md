@@ -122,6 +122,17 @@ notification-area icon whose menu is the entire user interface (`src/tray.rs`).
 - **Reload obeys the held-button gate**, via `pending_reload`: it ends in the
   same `apply()` write as the periodic reassert, so it waits for no buttons
   down plus 500ms quiet. See the gotcha below.
+- **`WM_CLOSE` means "stop the daemon", not "destroy the window."** Both it and
+  `WM_QUERYENDSESSION` clear `running` and return without destroying anything;
+  the input loop notices, restores the mouse, and only then does
+  `Tray::shutdown` post the private `WM_TRAY_QUIT` that actually tears the
+  window down. Inverting the default was necessary because those are the
+  messages an uninstaller's Restart Manager and the shell's sign-out send, and
+  under `DefWindowProcW` they would end the tray thread *alone* — leaving an
+  invisible input loop still holding a button back from Windows, with the icon
+  gone and no way left to ask for it. This is what lets the installer set
+  `CloseApplications=yes`. The icon therefore outlives the close request by
+  however long the restore takes, which is the point.
 - **No single-instance guard.** Nothing stops two copies fighting over the
   mouse. Worth adding if it ever bites - the Restart handover that used to make
   a mutex awkward is gone.
@@ -248,6 +259,8 @@ user but is not yet fully verified end-to-end (see the table below).
 | First run writes an inert config and logs where | **Confirmed 2026-08-14** — with `%APPDATA%\invisible-ptt` absent, a no-argument launch created the directory, wrote the starter, logged `first run: wrote a starter config to ...`, and connected to the mouse having disabled nothing: the applied mapping read `[01 02 03 04 05]` and the log said `button 3 still reaches Windows normally`. An earlier build that wrote the *example* instead was watched doing the opposite - it disabled the back button on a config with no Discord credentials, which is what the starter exists to prevent |
 | Open settings file / Open log file | **Fixed, not re-verified** — reported as "does nothing". It was not: Notepad opened the right file, *behind* everything, because nothing granted it the foreground. Now `AllowSetForegroundWindow` + `FindExecutableW` + a logged failure line. That fix has not been clicked yet |
 | Reload settings applies an edited config in place | **Confirmed 2026-08-14** — by the user, on hardware: edited config, Reload, new mapping in effect with no restart |
+| Installer (`installer/invisible-ptt.iss`) | **Not verified** — never compiled, let alone run. Inno Setup is not installed on the dev machine by choice; `.github/workflows/installer.yml` builds it on demand and `release.yml` publishes it on a tag, so the first `iscc` run will be in CI. Unknowns worth watching: whether the script compiles at all, whether `MB_DEFBUTTON2` is accepted by the Pascal compiler, and whether the extensionless `LICENSE` is happy as `LicenseFile` |
+| Installer's Restart Manager close | **Not verified** — depends on the `WM_CLOSE`/`WM_QUERYENDSESSION` handling above, which has not been triggered on hardware either. The failure to look for: uninstalling while the daemon runs leaves the back button dead until the mouse power-cycles. Test by uninstalling with the daemon running and a config that disables a button, then checking the button navigates again |
 | Tray: the icon's appearance | **Not verified** — whether `CreateIcon` drew a dot in a ring or quietly fell back to the generic app icon (32bpp DDB, expected row order is an assumption) |
 | Reassert does not interrupt held buttons | **Confirmed 2026-08-13** — the periodic `apply()` was glitching a held left button into a brief release (interrupted hold-to-fire, daemon-only). Fixed by gating the reassert on no-button-held + 500ms quiet; verified with a 2s-interval build holding left through ~10 reasserts with zero interruptions. Also confirms the spy reports the passthrough left button |
 

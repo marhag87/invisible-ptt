@@ -62,6 +62,14 @@ mod imp {
     /// this to the hidden window, with the real mouse message in lparam.
     const WM_TRAY: u32 = WM_APP + 1;
 
+    /// Take the window down. Posted by `Tray::shutdown` once the daemon has
+    /// finished with the mouse.
+    ///
+    /// This used to be `WM_CLOSE`, which now means the opposite - see the
+    /// window procedure. Keeping them separate is what lets the icon stay up
+    /// until the restore is actually done.
+    const WM_TRAY_QUIT: u32 = WM_APP + 2;
+
     // Menu command ids. 0 is reserved: TrackPopupMenu returns it for "the user
     // clicked away", so no item may use it.
     const ID_SETTINGS: usize = 1;
@@ -110,7 +118,7 @@ mod imp {
                 unsafe {
                     let _ = PostMessageW(
                         HWND(self.hwnd as *mut std::ffi::c_void),
-                        WM_CLOSE,
+                        WM_TRAY_QUIT,
                         WPARAM(0),
                         LPARAM(0),
                     );
@@ -219,6 +227,38 @@ mod imp {
                 }
                 LRESULT(0)
             }
+            // Somebody outside the process wants us gone: an uninstaller
+            // going through the Restart Manager, or the shell at sign-out.
+            // Both send WM_CLOSE and then wait for the process to exit.
+            //
+            // The default handling would destroy this window, which ends the
+            // tray thread and nothing else - leaving the input loop running
+            // with no icon and, far worse, a mouse button still withheld from
+            // Windows with no way left to ask for it back. So WM_CLOSE means
+            // "stop the daemon" instead: clear `running` and return without
+            // destroying anything. The input loop notices within its 100ms
+            // timeout, restores the mouse, and calls shutdown(), which posts
+            // WM_TRAY_QUIT to finish the job. The icon therefore stays up for
+            // exactly as long as the daemon is still holding the mouse.
+            WM_CLOSE => {
+                stop(hwnd);
+                LRESULT(0)
+            }
+            // The other way the same request arrives. The Restart Manager
+            // prefers this for windowed applications - lparam carries
+            // ENDSESSION_CLOSEAPP when it is the caller rather than a real
+            // sign-out - and answering TRUE means "yes, close me", which
+            // DefWindowProcW would say anyway. Stopping on both costs nothing:
+            // whichever comes first clears `running`, and the second finds it
+            // already cleared.
+            WM_QUERYENDSESSION => {
+                stop(hwnd);
+                LRESULT(1)
+            }
+            WM_TRAY_QUIT => {
+                let _ = DestroyWindow(hwnd);
+                LRESULT(0)
+            }
             WM_DESTROY => {
                 PostQuitMessage(0);
                 LRESULT(0)
@@ -229,6 +269,19 @@ mod imp {
 
     unsafe fn state<'a>(hwnd: HWND) -> Option<&'a State> {
         (GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const State).as_ref()
+    }
+
+    /// Ask the daemon to stop, the same way the Exit menu item does.
+    ///
+    /// Only ever sets the flag - the restore itself belongs to the input loop,
+    /// which owns the mouse. Idempotent, because the two messages that call it
+    /// can both arrive for one shutdown.
+    unsafe fn stop(hwnd: HWND) {
+        if let Some(state) = state(hwnd) {
+            if state.controls.running.swap(false, Ordering::SeqCst) {
+                log!("Windows asked us to close; restoring mouse...");
+            }
+        }
     }
 
     unsafe fn show_menu(hwnd: HWND, state: &State) {

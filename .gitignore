@@ -2,6 +2,9 @@
 /target/
 **/*.rs.bk
 
+# Built installers
+/dist/
+
 # Stray binaries copied next to the config for convenience
 *.exe
 *.pdb

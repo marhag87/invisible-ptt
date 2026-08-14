@@ -45,7 +45,13 @@ operating system and still legible to us, at the same time.
 
 ## Install
 
-Download `invisible-ptt.exe` from the [latest release][latest] and run it:
+Download `invisible-ptt-setup.exe` from the [latest release][latest] and run
+it. It installs for you alone — no administrator prompt — and offers a tick box
+for starting at sign-in, the same one the tray menu toggles later. Uninstalling
+asks before it deletes your settings.
+
+Or take the bare `invisible-ptt.exe` from the same release and run it from
+wherever you like; nothing about the program needs installing:
 
 ```
 invisible-ptt.exe
@@ -68,6 +74,20 @@ cargo build --release
 copy config.toml.example config.toml
 target\release\invisible-ptt.exe config.toml
 ```
+
+The installer is built by CI, so you don't need [Inno Setup][inno] on your own
+machine: run the **Installer** workflow from the Actions tab and download the
+setup exe it attaches. Tagging a release builds the same thing and publishes
+it. If you do have Inno Setup 6.3 or newer:
+
+```
+iscc /DAppVersion=0.1.0 installer\invisible-ptt.iss
+```
+
+leaves `dist\invisible-ptt-0.1.0-setup.exe`. CI reads that version out of
+`Cargo.toml`; by hand it defaults to `0.0.0` if you leave it off.
+
+[inno]: https://jrsoftware.org/isinfo.php
 
 [latest]: https://github.com/marhag87/invisible-ptt/releases/latest
 

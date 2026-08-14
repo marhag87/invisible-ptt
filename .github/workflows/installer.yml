@@ -1,0 +1,36 @@
+name: Installer
+
+# Build the Windows installer, on demand.
+#
+# Run it from the Actions tab ("Run workflow"); it attaches
+# invisible-ptt-<version>-setup.exe as an artifact. This exists so the installer
+# can be built and tested without putting Inno Setup on a development machine -
+# release.yml runs the same two steps when a version tag is pushed, and that is
+# where the published installer comes from.
+on:
+  workflow_dispatch:
+
+jobs:
+  installer:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release
+        run: cargo build --release --locked
+
+      - name: Build installer
+        id: installer
+        uses: ./.github/actions/build-installer
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: invisible-ptt-setup
+          path: ${{ steps.installer.outputs.path }}
+          if-no-files-found: error
