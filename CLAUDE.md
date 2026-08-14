@@ -82,8 +82,78 @@ cargo build --release
 target\release\invisible-ptt.exe config.toml
 ```
 
-Ctrl-C restores all buttons, stops the spy, returns to Onboard mode. Unplugging
-the receiver does the same — both settings are volatile.
+**Exit** in the tray menu restores all buttons, stops the spy, and returns to
+Onboard mode. Unplugging the receiver does the same — both settings are
+volatile.
+
+## The tray app
+
+On Windows this is a GUI-subsystem binary with no window and no console: a
+notification-area icon whose menu is the entire user interface (`src/tray.rs`).
+
+- **The tray owns a thread, not the input loop.** `TrackPopupMenu` blocks until
+  the user picks something, so it cannot share the loop — same reasoning as
+  `discord::RpcHandle`, and the same consequence if ignored. Menu items only
+  flip atomics (`running`, `restart`) that the loop reads within its 100ms
+  event timeout, or shell out. **Nothing in tray.rs touches the mouse.**
+- **`windows_subsystem = "windows"` means nothing prints anywhere**, so every
+  `println!`/`eprintln!` became `log!`/`logerr!` (`src/log.rs`), which tee to
+  `invisible-ptt.log` beside the config. That file is now the only account of
+  what happened overnight. The attribute is `cfg`-gated off under `test`, or it
+  would silence the test harness too.
+- **Startup failures get a message box** (`platform::error_box`). Without one a
+  bad config just means the app never appears. The *mouse* is the exception:
+  `connect_when_available()` waits for it instead of dying, because at sign-in
+  the receiver routinely has not enumerated yet and a modal dialog at every
+  boot would be the worst of both worlds.
+- **Autostart is `HKCU\...\Run`, not a scheduled task.** It needs no elevation
+  and gives the interactive session the daemon requires. It cannot express the
+  task's retry-at-logon, which the README keeps as the alternative.
+- **Reload swaps the config in place; it does not restart the process.** The
+  tray reads, parses, and validates (`load_config`), then sends a `Config` down
+  a channel; the input loop owns everything derived from it and rebuilds all of
+  it together - `default_action`, `rules`, `bit`, the Discord worker if the
+  credentials changed, and `dev.apply()`, which is also the only way to give
+  back a button the previous mapping had disabled. Two properties this split
+  buys: the loop never does file IO, and a rejected config is reported in a
+  message box *on the tray thread*, where blocking is allowed - showing one
+  from the input loop would freeze button handling until it was dismissed. A
+  bad config changes nothing; the running one stays.
+- **Reload obeys the held-button gate**, via `pending_reload`: it ends in the
+  same `apply()` write as the periodic reassert, so it waits for no buttons
+  down plus 500ms quiet. See the gotcha below.
+- **No single-instance guard.** Nothing stops two copies fighting over the
+  mouse. Worth adding if it ever bites - the Restart handover that used to make
+  a mutex awkward is gone.
+- **Config path: argument, then beside the exe, then
+  `%APPDATA%\invisible-ptt\config.toml`**, created from `config.toml.starter`
+  (`include_str!`) if nothing exists.
+- **The starter is inert on purpose, and is not the example.** Nothing
+  disabled, `default_action = "none"`, no rules — installing a push-to-talk
+  daemon must not be the moment someone's back button stops working, and the
+  example's `rpc` cannot do anything until Discord credentials exist, so
+  shipping *that* as the first run would break navigation and give nothing
+  back. Two tests hold the line: the starter must parse and validate, and it
+  must contain no `0` in `mapping`, no action, and no rules.
+  `config.toml.example` stays the fully configured reference the README points
+  at, and has its own test that it still parses. Never the working directory, which is what it used to be — launched
+  from the Run key the cwd is wherever the shell left it. Exe-adjacent beats
+  `%APPDATA%` so that every install predating this keeps working untouched.
+- **`log::init` creates its directory.** It runs before the config does, and a
+  file opened inside a directory that does not exist just fails — which
+  silently disabled logging for the whole first run, starting with the line
+  saying where the config had been created. Confirmed by watching it happen.
+- **Opening a file from the menu needs two things that are easy to miss**, and
+  getting either wrong looks identical to a dead menu item: the editor is
+  another process, so `AllowSetForegroundWindow` must hand it the foreground or
+  it opens *behind* everything; and neither `.toml` nor `.log` normally has an
+  association, so `FindExecutableW` decides between the shell and Notepad
+  rather than letting the user meet the "How do you want to open this file?"
+  chooser. The tray thread also holds a COM apartment, which `ShellExecuteW`
+  wants when it delegates to a shell extension.
+- The icon is drawn pixel-by-pixel in `make_icon()` so the repo carries no
+  binary asset; the shape is symmetric because `CreateIcon`'s expected row
+  order is not worth being sure about.
 
 ## Gotchas
 
@@ -103,7 +173,8 @@ the receiver does the same — both settings are volatile.
   confirmed 2026-08-13 as interrupted hold-to-fire in games, and *only* with the
   daemon running. Writes are therefore gated to run solely when no button is
   down and input has been quiet 500ms (`main.rs`, `button_state` /
-  `last_button_event`). **Do not remove that gate.** It relies on the spy
+  `last_button_event`). **Do not remove that gate.** The tray's Reload ends in
+  the same `apply()` and waits behind the same condition, via `pending_reload`. It relies on the spy
   reporting every button's raw state, including the passthrough left button
   (confirmed on hardware). Note the gate is checked *before* `apply()` sends its
   round-trips, so a button going down in between is still exposed — narrowing
@@ -156,6 +227,12 @@ user but is not yet fully verified end-to-end (see the table below).
 | Discord token auto-refresh (7-day expiry) | **Confirmed 2026-08-13** — startup refresh mints a fresh access_token, rotates the refresh_token, and rewrites `config.toml` in place with comments intact. The ~6-day periodic refresh and the auth-error log path share this same code but were not independently triggered |
 | State readback via `GetMode` + `GetMouseButtonMapping` | **Confirmed 2026-08-14** — both getters answer in *either* mode. Steady state reads `mode=02 (host), mapping=[01 02 03 00 05]`; after an idle-sleep the wake probe read `mode=01 (onboard), mapping=[01 02 03 04 05]`, i.e. the mouse falls all the way back to the factory profile, which is what makes the mapping a sound stand-in for the unreadable spy state. A failed read also precedes `lost the mouse`, so it doubles as the liveness check. Firmware returns exactly the configured span, no padding |
 | Read-gated reassert (poll writes only on divergence) | **Confirmed 2026-08-14** — a session covering a power-cycle toggle and a 5min idle-sleep produced zero `mouse forgot its configuration` lines, i.e. the poll read "as configured" every time and never wrote; startup's post-apply verification stayed silent; the wake path still recovers twice per wake and PTT still fires afterwards. The divergence branch itself (probe disagrees → `apply()`) has **not** been triggered on hardware: the wake event beat the poll to every reset in this run, which is the fallback working as intended but leaves that branch exercised only by unit tests |
+| Tray app starts, logs, and waits for an absent mouse | **Confirmed 2026-08-14** — run with the receiver unplugged and an inert config. No console window, no dialog; the log appears beside the config with local timestamps and a `---` session marker, `could not set up the mouse` is logged **once** and the process then sits waiting instead of exiting. Neither `tray: could not create its window` nor `tray: the shell refused the icon` appeared, so `CreateWindowExW` and `Shell_NotifyIconW(NIM_ADD)` both succeeded. `platform::error_box` was confirmed separately, by accident: an earlier build of the same run (before `connect_when_available`) blocked in `MessageBoxW` on the same failure |
+| Tray menu: opens, dispatches, autostart toggle, Exit | **Confirmed 2026-08-14** — by the user, and the log is the evidence: `will no longer start at sign-in` (so the Run key value had been written by an earlier click and was then deleted, i.e. both directions and the tick that follows the registry), then `exit requested from the tray` → `restoring mouse...`. The icon is findable and clickable |
+| First run writes an inert config and logs where | **Confirmed 2026-08-14** — with `%APPDATA%\invisible-ptt` absent, a no-argument launch created the directory, wrote the starter, logged `first run: wrote a starter config to ...`, and connected to the mouse having disabled nothing: the applied mapping read `[01 02 03 04 05]` and the log said `button 3 still reaches Windows normally`. An earlier build that wrote the *example* instead was watched doing the opposite - it disabled the back button on a config with no Discord credentials, which is what the starter exists to prevent |
+| Open settings file / Open log file | **Fixed, not re-verified** — reported as "does nothing". It was not: Notepad opened the right file, *behind* everything, because nothing granted it the foreground. Now `AllowSetForegroundWindow` + `FindExecutableW` + a logged failure line. That fix has not been clicked yet |
+| Reload settings applies an edited config in place | **Confirmed 2026-08-14** — by the user, on hardware: edited config, Reload, new mapping in effect with no restart |
+| Tray: the icon's appearance | **Not verified** — whether `CreateIcon` drew a dot in a ring or quietly fell back to the generic app icon (32bpp DDB, expected row order is an assumption) |
 | Reassert does not interrupt held buttons | **Confirmed 2026-08-13** — the periodic `apply()` was glitching a held left button into a brief release (interrupted hold-to-fire, daemon-only). Fixed by gating the reassert on no-button-held + 500ms quiet; verified with a 2s-interval build holding left through ~10 reasserts with zero interruptions. Also confirms the spy reports the passthrough left button |
 
 ### Review changes — what has been re-verified

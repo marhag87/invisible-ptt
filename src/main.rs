@@ -10,13 +10,25 @@
 //!
 //! The result: no window message, no virtual key, no low-level hook anywhere
 //! in Windows observes the button. Only this process knows it was pressed.
+//!
+//! On Windows it lives in the notification area: no console, no main window,
+//! just an icon with a menu (see tray.rs). Everything it would have printed
+//! goes to a log file beside the config instead (log.rs).
 
+// A GUI subsystem binary, so nothing pops a console window. Not under `test`:
+// the attribute applies to the test harness too, and would silence it.
+#![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
+
+#[macro_use]
+mod log;
 mod discord;
 mod hidpp;
 mod platform;
+mod tray;
 
 use hidpp::*;
 use serde::Deserialize;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -122,7 +134,7 @@ fn parse_action(s: &str) -> Action {
     }
     // Anything else is a typo. Say so: an unrecognised action is indis-
     // tinguishable at runtime from a button that simply does nothing.
-    eprintln!("warning: could not parse action '{s}', treating as none");
+    logerr!("warning: could not parse action '{s}', treating as none");
     Action::None
 }
 
@@ -147,7 +159,7 @@ impl Device {
             Some(i) => format!("index {i}"),
             None => "unsupported (polling only)".to_string(),
         };
-        println!(
+        log!(
             "onboard profiles = index {profiles_idx}, button spy = index {spy_idx}, wake events = {wake}"
         );
 
@@ -159,22 +171,20 @@ impl Device {
         };
         // What the mouse looked like before we touched it, for the log.
         match dev.probe(cfg) {
-            Ok(p) => println!("mouse was: {}", p.describe()),
-            Err(e) => eprintln!("warning: could not read the mouse state: {e}"),
+            Ok(p) => log!("mouse was: {}", p.describe()),
+            Err(e) => logerr!("warning: could not read the mouse state: {e}"),
         }
         dev.apply(cfg)?;
-        println!(
-            "connected; button {} is now invisible to the OS",
-            cfg.button
-        );
+        log!("connected");
+        report_visibility(cfg);
         // Say that only once it is true. apply() returning Ok means the mouse
         // acknowledged three writes, not that they took effect - Host mode in
         // particular is what stops an onboard profile from quietly overriding
         // the mapping, and its absence looks identical from the write side.
         match dev.probe(cfg) {
             Ok(p) if p.matches(&cfg.mapping) => {}
-            Ok(p) => eprintln!("warning: the mouse did not take it: {}", p.describe()),
-            Err(e) => eprintln!("warning: could not confirm the mouse state: {e}"),
+            Ok(p) => logerr!("warning: the mouse did not take it: {}", p.describe()),
+            Err(e) => logerr!("warning: could not confirm the mouse state: {e}"),
         }
         Ok(dev)
     }
@@ -265,30 +275,173 @@ impl Probe {
     }
 }
 
-fn main() {
-    let path = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "config.toml".to_string());
+/// What the daemon writes on a first run.
+///
+/// Deliberately *inert* - nothing disabled, no action - and a separate file
+/// from `config.toml.example`, which is the fully configured reference the
+/// README points at. Installing a push-to-talk daemon must not be the moment
+/// your browser's back button stops working, especially when the example's
+/// `rpc` action cannot do anything until Discord credentials exist. So the
+/// button keeps working until the user says otherwise; the comments in the
+/// file say how.
+const STARTER: &str = include_str!("../config.toml.starter");
 
-    let text = match std::fs::read_to_string(&path) {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("could not read {path}: {e}");
-            eprintln!("see config.toml.example");
-            std::process::exit(1);
-        }
-    };
-    let mut cfg: Config = match toml::from_str(&text) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("bad config: {e}");
-            std::process::exit(1);
-        }
-    };
-    if let Err(e) = cfg.validate() {
-        eprintln!("bad config: {e}");
-        std::process::exit(1);
+/// Where the config lives, in order of precedence:
+///
+///   1. the path given on the command line - explicit always wins, which is
+///      what existing scheduled tasks and `cargo run` pass;
+///   2. `config.toml` beside the executable, *if it already exists* - a
+///      portable install, and what every install before this one looked like;
+///   3. `%APPDATA%\invisible-ptt\config.toml`, created on first run.
+///
+/// Never the current directory, which is what this used to default to: started
+/// from the Run key the working directory is wherever the shell left it.
+/// Always absolute, because the tray opens this path, the Run key entry embeds
+/// it, and a restart passes it on.
+fn config_path() -> PathBuf {
+    if let Some(arg) = std::env::args_os().nth(1) {
+        let path = PathBuf::from(arg);
+        return std::path::absolute(&path).unwrap_or(path);
     }
+    if let Ok(exe) = std::env::current_exe() {
+        let beside = exe.with_file_name("config.toml");
+        if beside.is_file() {
+            return beside;
+        }
+    }
+    match platform::config_dir() {
+        Some(dir) => dir.join("config.toml"),
+        None => PathBuf::from("config.toml"),
+    }
+}
+
+/// Write a starter config, creating its directory.
+///
+/// A settings file that does not exist is the one thing the tray cannot
+/// explain: the menu item opens nothing, and there is no window to say why.
+/// So the daemon always has a config to point at, even on a first run with no
+/// arguments and nothing installed.
+fn create_config(path: &Path) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(path, STARTER)
+}
+
+/// Connect, waiting for the mouse to turn up rather than giving up on it.
+///
+/// At sign-in the receiver routinely has not enumerated yet. The console app
+/// could exit and let Task Scheduler retry it a minute later; a tray app
+/// cannot, because a process that quits before its icon settles is
+/// indistinguishable from one that never started. So it waits - which is only
+/// what the runtime reconnect already does when the mouse disappears later.
+///
+/// Returns None if Exit or Restart was chosen while waiting.
+fn connect_when_available(
+    api: &hidapi::HidApi,
+    cfg: &Config,
+    running: &AtomicBool,
+) -> Option<Device> {
+    let mut reported = false;
+    loop {
+        match Device::connect(api, cfg) {
+            Ok(dev) => return Some(dev),
+            Err(e) => {
+                // Once only: at sign-in this can go on for a minute, and the
+                // same line every five seconds buries the log.
+                if !reported {
+                    logerr!("could not set up the mouse: {e}");
+                    logerr!("waiting for it; note that G HUB holds the HID++ channel open");
+                    reported = true;
+                }
+            }
+        }
+        // Five seconds between attempts, but checked often enough that Exit
+        // doesn't appear to hang.
+        for _ in 0..20 {
+            if !running.load(Ordering::SeqCst) {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+    }
+}
+
+/// Read, parse, and validate a config.
+///
+/// The error is a sentence fit to show a human, because both callers have to
+/// explain themselves to one: startup in a message box before exiting, and the
+/// tray's Reload in a message box that says nothing was changed.
+fn load_config(path: &Path) -> std::result::Result<Config, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("could not read {}: {e}", path.display()))?;
+    let cfg: Config = toml::from_str(&text).map_err(|e| format!("bad config: {e}"))?;
+    cfg.validate().map_err(|e| format!("bad config: {e}"))?;
+    Ok(cfg)
+}
+
+/// Lowercase the rule keys once, so matching a foreground process is a plain
+/// comparison. See `match_action`.
+fn compile_rules(cfg: &Config) -> Vec<(String, Action)> {
+    cfg.rules
+        .iter()
+        .map(|r| (r.process.to_ascii_lowercase(), parse_action(&r.action)))
+        .collect()
+}
+
+/// Whether the mapping actually hides the button being watched.
+///
+/// Configuring this takes two edits - the `0` in `mapping` and an action - and
+/// doing only the second is the easy mistake, one whose symptom is
+/// "push-to-talk works but my browser still navigates back". So say which case
+/// we are in, both at startup and after a reload, rather than printing the
+/// same confident line either way.
+fn report_visibility(cfg: &Config) {
+    if cfg.mapping.get(usize::from(cfg.button)) == Some(&0) {
+        log!("button {} is invisible to the OS", cfg.button);
+    } else {
+        log!(
+            "button {} still reaches Windows normally - put a 0 in mapping[{}] to hide it",
+            cfg.button,
+            cfg.button
+        );
+    }
+}
+
+/// Nowhere to print to and no window to put it in, so a startup failure gets a
+/// message box. Without one the app would simply never appear.
+fn fatal(msg: &str) -> ! {
+    logerr!("{msg}");
+    platform::error_box(msg);
+    std::process::exit(1)
+}
+
+fn main() {
+    let path = config_path();
+    // Beside the config, which is the one directory the daemon already assumes
+    // it can write to (token refresh rewrites config.toml in place).
+    let log_path = path.with_file_name("invisible-ptt.log");
+    log::init(&log_path);
+    // The log outlives any one session, so mark where this one starts.
+    log!("--- invisible-ptt starting on {}", path.display());
+
+    if !path.exists() {
+        match create_config(&path) {
+            // Loud on purpose: this is the one moment the user has to be told
+            // where their settings live, and Open settings file is how they
+            // get back to it.
+            Ok(()) => log!(
+                "first run: wrote a starter config to {}. It changes nothing until you edit it - Open settings file in the tray menu.",
+                path.display()
+            ),
+            Err(e) => fatal(&format!("could not create {}: {e}", path.display())),
+        }
+    }
+
+    let mut cfg = match load_config(&path) {
+        Ok(cfg) => cfg,
+        Err(e) => fatal(&e),
+    };
 
     // Discord access tokens expire after 7 days. If we have the credentials to
     // refresh, do so at startup and write the rotated tokens back, so a restart
@@ -299,43 +452,55 @@ fn main() {
         cfg.discord.refresh_token = refresh.clone();
         refreshed_at_startup = true;
         match discord::persist_tokens(&path, &access, &refresh) {
-            Ok(()) => println!("refreshed discord access token"),
-            Err(e) => eprintln!("warning: refreshed token but could not save it to {path}: {e}"),
+            Ok(()) => log!("refreshed discord access token"),
+            Err(e) => logerr!(
+                "warning: refreshed token but could not save it to {}: {e}",
+                path.display()
+            ),
         }
     }
 
-    let default_action = parse_action(&cfg.default_action);
-    let rules: Vec<(String, Action)> = cfg
-        .rules
-        .iter()
-        .map(|r| (r.process.to_ascii_lowercase(), parse_action(&r.action)))
-        .collect();
+    // Rebuilt from scratch on every reload, hence mutable.
+    let mut default_action = parse_action(&cfg.default_action);
+    let mut rules = compile_rules(&cfg);
 
     let api = match hidapi::HidApi::new() {
         Ok(a) => a,
-        Err(e) => {
-            eprintln!("hidapi init failed: {e}");
-            std::process::exit(1);
-        }
+        Err(e) => fatal(&format!("hidapi init failed: {e}")),
     };
 
     let running = Arc::new(AtomicBool::new(true));
+    // The tray parses a reloaded config and sends it here; this thread owns
+    // everything that has to change as a result.
+    let (reload_tx, reload_rx) = std::sync::mpsc::channel::<Config>();
     {
         let r = running.clone();
         let _ = ctrlc::set_handler(move || r.store(false, Ordering::SeqCst));
     }
 
-    let mut dev = match Device::connect(&api, &cfg) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("could not set up the mouse: {e}");
-            eprintln!("is G HUB running? it holds the HID++ channel open.");
-            std::process::exit(1);
+    // Before the mouse, so that waiting for it still gives the user something
+    // to click Exit on.
+    let tray = tray::spawn(tray::Controls {
+        running: running.clone(),
+        reload: reload_tx,
+        config: path.clone(),
+        log: log_path,
+    });
+
+    let mut dev = match connect_when_available(&api, &cfg, &running) {
+        Some(dev) => dev,
+        None => {
+            // Exit chosen before the mouse ever turned up. Nothing to restore:
+            // we never got as far as changing anything.
+            tray.shutdown();
+            return;
         }
     };
 
     let mut discord = discord::RpcHandle::spawn(&cfg.discord);
-    let bit: u16 = 1 << cfg.button;
+    let mut bit: u16 = 1 << cfg.button;
+    // A config from the tray, waiting for a safe moment to be applied.
+    let mut pending_reload: Option<Config> = None;
     let mut held = false;
     let mut active: Action = Action::None;
     let mut last_poll = Instant::now();
@@ -364,9 +529,54 @@ fn main() {
             retry_window
         };
 
-    println!("running - ctrl-c to stop and restore the mouse");
+    log!("running - Exit from the tray menu stops and restores the mouse");
 
     while running.load(Ordering::SeqCst) {
+        // Reload settings, from the tray. It arrives already parsed and
+        // validated - a bad file never gets this far, and the running
+        // configuration survives it untouched.
+        if let Ok(new) = reload_rx.try_recv() {
+            pending_reload = Some(new);
+        }
+        // Applied under the same rule as the reassert below: never write to
+        // the mouse while a button is down. The click that opened the menu is
+        // long since up, so in practice this waits 500ms and no longer.
+        if pending_reload.is_some()
+            && button_state == 0
+            && last_button_event.elapsed() > Duration::from_millis(500)
+        {
+            let new = pending_reload.take().expect("checked on the line above");
+            // The action in flight belongs to the old configuration and may
+            // not exist in the new one. A synthesised key left logically down
+            // would never come back up.
+            release(&mut held, &mut active, &discord);
+            // Reconnecting Discord costs a handshake on the next press, so
+            // only do it when the credentials actually changed.
+            let credentials_changed = new.discord.client_id != cfg.discord.client_id
+                || new.discord.access_token != cfg.discord.access_token
+                || new.discord.refresh_token != cfg.discord.refresh_token;
+            cfg = new;
+            default_action = parse_action(&cfg.default_action);
+            rules = compile_rules(&cfg);
+            bit = 1 << cfg.button;
+            if credentials_changed {
+                discord.reconfigure(&cfg.discord);
+                // Whatever the old token's schedule was, it is not this one's.
+                next_refresh = Instant::now();
+            }
+            // Writing the new mapping is also the only way to give back a
+            // button the old one had disabled.
+            match dev.apply(&cfg) {
+                Ok(()) => {
+                    log!("reloaded {}", path.display());
+                    report_visibility(&cfg);
+                }
+                // The mouse is away; the reconnect below re-applies whatever
+                // is current, which is now the config we just swapped in.
+                Err(e) => logerr!("reloaded, but the mouse did not take it: {e}"),
+            }
+        }
+
         // Proactive Discord token refresh for long-lived sessions. On success
         // hand the new credentials to the RPC worker, which drops the current
         // connection and re-authenticates on the next press.
@@ -376,7 +586,7 @@ fn main() {
                 cfg.discord.refresh_token = refresh.clone();
                 let _ = discord::persist_tokens(&path, &access, &refresh);
                 discord.reconfigure(&cfg.discord);
-                println!("refreshed discord access token");
+                log!("refreshed discord access token");
                 next_refresh = Instant::now() + refresh_window;
             } else {
                 next_refresh = Instant::now() + retry_window;
@@ -417,7 +627,7 @@ fn main() {
                 && match dev.probe(&cfg) {
                     Ok(p) if p.matches(&cfg.mapping) => true,
                     Ok(p) => {
-                        eprintln!("mouse forgot its configuration ({})", p.describe());
+                        logerr!("mouse forgot its configuration ({})", p.describe());
                         false
                     }
                     // Unreadable means unreachable, which the reconnect handles.
@@ -436,9 +646,9 @@ fn main() {
                         Err(_) => false,
                     };
                 if ok && !connected {
-                    eprintln!("mouse back");
+                    logerr!("mouse back");
                 } else if !ok && connected {
-                    eprintln!("lost the mouse; waiting for it to come back...");
+                    logerr!("lost the mouse; waiting for it to come back...");
                 }
                 connected = ok;
             }
@@ -463,7 +673,7 @@ fn main() {
         // dropped Host mode, the mapping, and the spy. Re-arm immediately
         // rather than waiting out the fallback poll.
         if Some(event[2]) == dev.wireless_idx {
-            eprintln!("wake event -> reasserting mouse state");
+            logerr!("wake event -> reasserting mouse state");
             // The wake line already announces recovery, so update state
             // silently to keep the poll from printing "mouse back" too. A hold
             // cannot have survived the disconnect, and its release event is
@@ -512,12 +722,13 @@ fn main() {
     }
 
     // Always give the mouse back in a usable state.
-    println!("restoring mouse...");
+    log!("restoring mouse...");
     release(&mut held, &mut active, &discord);
     dev.restore(&cfg);
     // Only now wait for that release to actually reach Discord: this is the one
     // place we block on it, so the mouse is already restored if Discord hangs.
     discord.shutdown();
+    tray.shutdown();
 }
 
 /// End the hold in progress, if there is one.
@@ -649,6 +860,40 @@ mod tests {
 
     fn config(text: &str) -> Config {
         toml::from_str(text).unwrap()
+    }
+
+    #[test]
+    fn the_starter_config_parses_and_validates() {
+        // What create_config() writes on first run. If it ever stops being a
+        // working config, a first run is a message box, not a daemon.
+        let cfg: Config = toml::from_str(STARTER).expect("the starter must parse");
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn the_starter_config_changes_nothing_until_configured() {
+        // The whole point of shipping a starter separate from the example:
+        // installing the daemon must not take a mouse button away from someone
+        // who has not yet said which one, or asked for anything to happen.
+        let cfg: Config = toml::from_str(STARTER).unwrap();
+        assert!(
+            cfg.mapping.iter().all(|&code| code != 0),
+            "the starter must not disable a button: {:?}",
+            cfg.mapping
+        );
+        assert_eq!(parse_action(&cfg.default_action), Action::None);
+        // A rule would fire its action on top of the button still working
+        // normally, which is not inert either.
+        assert!(cfg.rules.is_empty());
+    }
+
+    #[test]
+    fn the_documented_example_is_a_working_config() {
+        // Not embedded in the binary - only the starter is - but it is what
+        // the README tells people to copy, so it has to parse and validate.
+        let text = include_str!("../config.toml.example");
+        let cfg: Config = toml::from_str(text).expect("config.toml.example must parse");
+        assert!(cfg.validate().is_ok());
     }
 
     #[test]

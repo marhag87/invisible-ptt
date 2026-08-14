@@ -19,6 +19,13 @@ features = [
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_System_Threading",
+    # The tray icon, its menu, and the rest of its small world.
+    "Win32_UI_Shell",              # Shell_NotifyIconW, ShellExecuteW
+    "Win32_Graphics_Gdi",          # WNDCLASSW's HBRUSH
+    "Win32_System_LibraryLoader",  # GetModuleHandleW
+    "Win32_System_Com",            # an apartment for ShellExecuteW's handlers
+    "Win32_System_Registry",       # the start-at-sign-in toggle
+    "Win32_System_SystemInformation", # GetLocalTime, for log timestamps
 ]
 
 [profile.release]

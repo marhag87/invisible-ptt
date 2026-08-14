@@ -1,6 +1,12 @@
 # invisible-ptt configuration
 #
-# Copy to config.toml next to the exe.
+# A fully configured reference. What the daemon actually writes on its first
+# run is config.toml.starter, which is inert until you edit it; this file is
+# where it ends up once it is doing something.
+#
+# It lives at %APPDATA%\invisible-ptt\config.toml, which Open settings file in
+# the tray menu opens. Put a config.toml next to the exe instead for a portable
+# install, or pass a path as the first argument - either takes precedence.
 
 # Spy index of the button to make invisible.
 # On the G PRO X Superlight: 0=left 1=right 2=middle 3=back 4=forward

@@ -31,6 +31,7 @@ pub fn vk_by_name(name: &str) -> u16 {
 mod imp {
     use windows::core::PWSTR;
     use windows::Win32::Foundation::{CloseHandle, MAX_PATH};
+    use windows::Win32::System::SystemInformation::GetLocalTime;
     use windows::Win32::System::Threading::{
         OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
         PROCESS_QUERY_LIMITED_INFORMATION,
@@ -39,7 +40,9 @@ mod imp {
         SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
         VIRTUAL_KEY,
     };
-    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, GetWindowThreadProcessId, MessageBoxW, MB_ICONERROR, MB_OK,
+    };
 
     pub fn foreground_process() -> Option<String> {
         unsafe {
@@ -95,6 +98,33 @@ mod imp {
             SendInput(&[input], std::mem::size_of::<INPUT>() as i32);
         }
     }
+
+    pub fn timestamp() -> String {
+        let t = unsafe { GetLocalTime() };
+        format!(
+            "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+            t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond
+        )
+    }
+
+    /// `%APPDATA%\invisible-ptt` - roaming, per-user, and writable without
+    /// elevation, which the exe's own folder is not once it lives in Program
+    /// Files. The daemon rewrites its config there on every token refresh.
+    pub fn config_dir() -> Option<std::path::PathBuf> {
+        std::env::var_os("APPDATA").map(|dir| std::path::PathBuf::from(dir).join("invisible-ptt"))
+    }
+
+    pub fn error_box(msg: &str) {
+        let text: Vec<u16> = msg.encode_utf16().chain(Some(0)).collect();
+        unsafe {
+            MessageBoxW(
+                None,
+                windows::core::PCWSTR(text.as_ptr()),
+                windows::core::w!("invisible-ptt"),
+                MB_ICONERROR | MB_OK,
+            );
+        }
+    }
 }
 
 #[cfg(not(windows))]
@@ -105,9 +135,34 @@ mod imp {
     pub fn key(vk: u16, down: bool) {
         println!("[stub] key 0x{vk:02x} {}", if down { "down" } else { "up" });
     }
+
+    /// Seconds since the epoch. The log is a Windows feature - on Linux this
+    /// only has to be monotonic enough to order the smoke-test output.
+    pub fn timestamp() -> String {
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        format!("{secs}")
+    }
+
+    /// The XDG equivalent, so the Linux smoke-test build behaves like a
+    /// citizen rather than dropping files wherever it was started.
+    pub fn config_dir() -> Option<std::path::PathBuf> {
+        let base = std::env::var_os("XDG_CONFIG_HOME")
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config"))
+            })?;
+        Some(base.join("invisible-ptt"))
+    }
+
+    pub fn error_box(msg: &str) {
+        eprintln!("{msg}");
+    }
 }
 
-pub use imp::{foreground_process, key};
+pub use imp::{config_dir, error_box, foreground_process, key, timestamp};
 
 #[cfg(test)]
 mod tests {

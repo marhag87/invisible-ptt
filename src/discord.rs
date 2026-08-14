@@ -135,7 +135,7 @@ impl Rpc {
                 // us, especially at logon. Keep retrying on later presses, but
                 // log only on the transition so a burst of presses stays quiet.
                 if !self.warned_unavailable {
-                    eprintln!("discord rpc unavailable (is Discord running?); will retry");
+                    logerr!("discord rpc unavailable (is Discord running?); will retry");
                     self.warned_unavailable = true;
                 }
                 return;
@@ -187,7 +187,7 @@ impl Rpc {
                             .and_then(|d| d.get("message"))
                             .and_then(|m| m.as_str())
                             .unwrap_or("unknown error");
-                        eprintln!("discord authenticate failed: {msg}");
+                        logerr!("discord authenticate failed: {msg}");
                         return Err(std::io::Error::new(
                             std::io::ErrorKind::PermissionDenied,
                             "discord rejected the access token (it may be expired)",
@@ -298,7 +298,7 @@ pub fn refresh(cfg: &crate::DiscordCfg) -> Option<(String, String)> {
     {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("discord token refresh: could not run curl: {e}");
+            logerr!("discord token refresh: could not run curl: {e}");
             return None;
         }
     };
@@ -309,12 +309,12 @@ pub fn refresh(cfg: &crate::DiscordCfg) -> Option<(String, String)> {
     let out = match child.wait_with_output() {
         Ok(o) => o,
         Err(e) => {
-            eprintln!("discord token refresh: curl failed: {e}");
+            logerr!("discord token refresh: curl failed: {e}");
             return None;
         }
     };
     if !out.status.success() {
-        eprintln!(
+        logerr!(
             "discord token refresh: curl exited {}: {}",
             out.status,
             String::from_utf8_lossy(&out.stderr).trim()
@@ -332,7 +332,7 @@ fn parse_refresh_response(bytes: &[u8]) -> Option<(String, String)> {
     let json: serde_json::Value = match serde_json::from_slice(bytes) {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("discord token refresh: could not parse response: {e}");
+            logerr!("discord token refresh: could not parse response: {e}");
             return None;
         }
     };
@@ -343,7 +343,7 @@ fn parse_refresh_response(bytes: &[u8]) -> Option<(String, String)> {
         (Some(access), Some(refresh)) => Some((access.to_string(), refresh.to_string())),
         _ => {
             // Discord reports failures as {"error", "error_description"}.
-            eprintln!(
+            logerr!(
                 "discord token refresh rejected: {}",
                 json.get("error_description")
                     .or_else(|| json.get("error"))
@@ -360,7 +360,7 @@ fn parse_refresh_response(bytes: &[u8]) -> Option<(String, String)> {
 /// plus rename so a crash mid-write cannot corrupt the config or lose the
 /// single-use refresh token.
 pub fn persist_tokens(
-    config_path: &str,
+    config_path: &std::path::Path,
     access_token: &str,
     refresh_token: &str,
 ) -> std::io::Result<()> {
@@ -371,7 +371,9 @@ pub fn persist_tokens(
     doc["discord"]["access_token"] = toml_edit::value(access_token);
     doc["discord"]["refresh_token"] = toml_edit::value(refresh_token);
 
-    let tmp = format!("{config_path}.tmp");
+    let mut tmp = config_path.to_path_buf().into_os_string();
+    tmp.push(".tmp");
+    let tmp = std::path::PathBuf::from(tmp);
     std::fs::write(&tmp, doc.to_string())?;
     std::fs::rename(&tmp, config_path)
 }
@@ -412,7 +414,6 @@ mod tests {
     #[test]
     fn persist_tokens_rewrites_values_and_keeps_comments() {
         let path = temp_config_path(line!());
-        let path_str = path.to_str().unwrap();
         let original = "\
 # leading comment
 button = 3
@@ -426,7 +427,7 @@ refresh_token = \"old_refresh\"
 ";
         std::fs::write(&path, original).unwrap();
 
-        persist_tokens(path_str, "new_access", "new_refresh").unwrap();
+        persist_tokens(&path, "new_access", "new_refresh").unwrap();
 
         let result = std::fs::read_to_string(&path).unwrap();
         std::fs::remove_file(&path).ok();
@@ -446,10 +447,9 @@ refresh_token = \"old_refresh\"
     fn persist_tokens_inserts_missing_refresh_token_key() {
         // First-run config that has no refresh_token line yet.
         let path = temp_config_path(line!());
-        let path_str = path.to_str().unwrap();
         std::fs::write(&path, "[discord]\naccess_token = \"old\"\n").unwrap();
 
-        persist_tokens(path_str, "a", "r").unwrap();
+        persist_tokens(&path, "a", "r").unwrap();
 
         let result = std::fs::read_to_string(&path).unwrap();
         std::fs::remove_file(&path).ok();

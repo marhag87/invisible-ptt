@@ -45,13 +45,21 @@ operating system and still legible to us, at the same time.
 
 ## Install
 
-Download `invisible-ptt.exe` from the [latest release][latest] and put a config
-next to it — [`config.toml.example`](config.toml.example) is the template,
-saved as `config.toml`:
+Download `invisible-ptt.exe` from the [latest release][latest] and run it:
 
 ```
-invisible-ptt.exe config.toml
+invisible-ptt.exe
 ```
+
+It runs in the notification area: no window, no console, just an icon. On the
+first run it writes a starter config to `%APPDATA%\invisible-ptt\config.toml`
+and **does nothing at all** — no button is hidden from Windows until you say
+which one. **Open settings file** in the tray menu opens it; the comments in it
+say what to change; **Reload settings** picks up the edits.
+
+Two ways to override that location: put a `config.toml` next to the exe (a
+portable install), or pass a path as the first argument. Either wins over
+`%APPDATA%`.
 
 Or build it yourself:
 
@@ -74,12 +82,28 @@ With the program running, press the back button:
 - Your browser should **not** navigate back.
 - Discord (or your game) should transmit.
 
-Ctrl-C restores the button and hands control back to the onboard profile.
-Unplugging the receiver does the same, since both settings are volatile.
+**Exit** in the tray menu restores the button and hands control back to the
+onboard profile. Unplugging the receiver does the same, since both settings are
+volatile.
+
+## The tray menu
+
+Right-click (or left-click) the icon:
+
+| | |
+|---|---|
+| **Open settings file** | `config.toml`, in your usual editor |
+| **Open log file** | `invisible-ptt.log`, beside the config — everything the daemon has to say goes there, since there is no console to print to. Rotates at 1 MB |
+| **Reload settings** | applies an edited config without restarting: new mapping, new rules, new Discord credentials. A config with a mistake in it is rejected with a message box and nothing changes |
+| **Start automatically at sign-in** | ticked when the entry under `HKCU\...\Run` exists. See below |
+| **Exit** | stops and restores the mouse |
 
 ## Configuration
 
-See `config.toml.example`. The important knobs:
+`%APPDATA%\invisible-ptt\config.toml` unless you overrode it above. It starts
+as [`config.toml.starter`](config.toml.starter), which does nothing;
+[`config.toml.example`](config.toml.example) is the same file fully configured,
+and worth reading next. The important knobs:
 
 - `button` — spy index of the button to hijack (`3` = back on the Superlight)
 - `mapping` — one byte per physical button, `0` disables for HID
@@ -143,10 +167,32 @@ push-to-talk.
 
 ## Run at startup
 
-The daemon synthesises keystrokes and reads the foreground window, so it must
-run **in your interactive session as you** — not as a service or a Session 0
-task. Use Task Scheduler with an at-log-on trigger. Run once in PowerShell
-(point the paths at wherever you keep the exe and config):
+Tick **Start automatically at sign-in** in the tray menu. That writes an entry
+under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` pointing at the exe
+and the config it was started with, which runs the daemon **in your interactive
+session as you** — required, because it synthesises keystrokes and reads the
+foreground window, neither of which works from a service or a Session 0 task.
+No elevation needed: HID++ vendor-collection access doesn't require admin.
+
+Untick it to remove the entry. Move the exe and you must re-tick it, since the
+path is baked in.
+
+Discord does **not** need to be running when the daemon starts. The RPC
+connection is made lazily on first use and retried on every press, so it picks
+Discord up whenever it launches — order at sign-in doesn't matter.
+
+**Stop G HUB from auto-starting** too, or it'll grab the HID++ channel and
+fight the daemon at sign-in.
+
+The receiver often hasn't enumerated yet when the Run key fires. That's fine —
+the daemon waits for the mouse rather than giving up, and the icon is there the
+whole time.
+
+### Or: Task Scheduler
+
+The one thing the Run key can't do is start the daemon again if it crashes.
+Run once in PowerShell (point the paths at wherever you keep the exe and
+config):
 
 ```powershell
 $exe = "C:\path\to\invisible-ptt.exe"
@@ -161,34 +207,11 @@ Why these settings:
 
 - `-ExecutionTimeLimit 0` — the daemon runs indefinitely; without this the task
   is killed after three days.
-- `-RestartCount 3 -RestartInterval 1min` — if the mouse hasn't enumerated yet
-  when the task fires at logon, the daemon exits; this retries it a minute
-  later, giving the receiver time to come up.
+- `-RestartCount 3 -RestartInterval 1min` — brings it back if it dies.
 - Runs as you, in your session — required for `SendInput`, foreground
   detection, and writing rotated Discord tokens back to `config.toml`.
-- No elevation needed — HID++ vendor-collection access doesn't require admin.
 
-Discord does **not** need to be running when the daemon starts. The RPC
-connection is made lazily on first use and retried on every press, so it picks
-Discord up whenever it launches — order at logon doesn't matter.
-
-This is a console app, so the task pops a terminal window that stays open. To
-run it hidden, point the task at a one-line VBScript launcher instead — create
-`run-hidden.vbs`:
-
-```vbscript
-CreateObject("WScript.Shell").Run "cmd /c """"C:\path\to\invisible-ptt.exe"" ""C:\path\to\config.toml""""", 0, False
-```
-
-and set the action to `-Execute "wscript.exe" -Argument "`"C:\path\to\run-hidden.vbs`""`.
-The trailing `0` runs it with no window.
-
-**Simpler alternative:** drop a shortcut to the exe (with the config path as its
-argument) into `shell:startup`. It always shows a console window and won't
-restart on crash, but it needs no setup.
-
-Either way, **stop G HUB from auto-starting** too, or it'll grab the HID++
-channel and fight the daemon at logon.
+Untick the tray toggle if you use this, or both will start a copy.
 
 ## Known caveats
 

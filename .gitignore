@@ -10,6 +10,10 @@
 # Track config.toml.example instead.
 config.toml
 
+# The daemon's log, written beside the config it was started with.
+invisible-ptt.log
+invisible-ptt.log.old
+
 # Editors
 .vscode/
 .idea/

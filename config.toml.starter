@@ -1,0 +1,43 @@
+# invisible-ptt configuration
+#
+# Written on first run, and deliberately inert: nothing is hidden from Windows
+# and the button does nothing, so installing this cannot break your mouse
+# before you have decided what it should do.
+#
+# To switch it on:
+#   1. put a 0 in `mapping` for the button Windows should stop seeing
+#   2. set `default_action` to what that button should do instead
+#   3. pick Reload settings from the tray menu
+#
+# config.toml.example, in the repository, is the same file fully configured -
+# per-application rules and all.
+
+# Spy index of the button to hijack.
+# On the G PRO X Superlight: 0=left 1=right 2=middle 3=back 4=forward
+button = 3
+
+# One entry per physical button, in order. 0 = invisible to the OS.
+# All enabled, so nothing changes yet. Make the 4th entry 0 to take the back
+# button away from Windows.
+mapping = [1, 2, 3, 4, 5]
+
+# What the button does while held, when no rule below matches.
+# "none" | "rpc" | "key:V" | "key:F13" | "key:0x13"
+# "key:F13" is the easiest first test: it proves the button is being read
+# without needing any Discord setup.
+default_action = "none"
+
+# Per-application overrides, matched on executable name (case-insensitive).
+# Uncomment to send the key a game's own voice chat expects, but only while
+# that game is focused.
+# [[rules]]
+# process = "cs2.exe"
+# action = "key:V"
+
+# Discord push-to-talk over its local pipe, used by action "rpc". Needs the
+# one-time OAuth setup in the README; leave empty if you are not using it.
+[discord]
+client_id = ""
+client_secret = ""
+access_token = ""
+refresh_token = ""
