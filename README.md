@@ -152,9 +152,11 @@ Discord access tokens expire after 7 days. Because `client_secret` and
 fresh access token **at startup and again every ~6 days**, and writes the
 rotated values back to `config.toml` (in place, comments preserved). So you do
 the browser authorize in steps 3–4 exactly once; after that it self-heals and
-you never touch it again. The refresh uses `curl` (bundled with Windows 10
-1803+ and 11). If a refresh is ever rejected — e.g. you revoke the app — the
-daemon logs `discord authenticate failed: …` instead of silently going mute.
+you never touch it again. That POST is the only network request this program
+ever makes, and it goes through WinHTTP — Windows' own TLS, no bundled HTTP
+stack, no child process. If a refresh is ever rejected — e.g. you revoke the
+app — the daemon logs `discord authenticate failed: …` instead of silently
+going mute.
 
 You are allowed to authorize your *own* application without Discord
 whitelisting it; the whitelist requirement applies to shipping it to other

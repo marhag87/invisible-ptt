@@ -23,6 +23,7 @@ features = [
     "Win32_UI_Shell",              # Shell_NotifyIconW, ShellExecuteW
     "Win32_Graphics_Gdi",          # WNDCLASSW's HBRUSH
     "Win32_System_LibraryLoader",  # GetModuleHandleW
+    "Win32_Networking_WinHttp",    # the Discord token refresh, our only request
     "Win32_System_Com",            # an apartment for ShellExecuteW's handlers
     "Win32_System_Registry",       # the start-at-sign-in toggle
     "Win32_System_SystemInformation", # GetLocalTime, for log timestamps

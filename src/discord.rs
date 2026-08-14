@@ -259,17 +259,16 @@ fn open_pipe() -> std::io::Result<Conn> {
     Err(last)
 }
 
-/// Trade the refresh token for a fresh access token via Discord's OAuth2
-/// endpoint, returning `(access_token, refresh_token)` on success.
-///
-/// This shells out to `curl` (bundled with Windows 10 1803+ and 11) rather
-/// than pulling an HTTPS/TLS stack into the binary. The credentials go in over
-/// stdin, never as argv, so they do not show up in a process listing. Any
-/// failure returns None with a log line and leaves the caller's tokens as-is,
-/// so a transient network problem never clobbers a still-valid token.
-pub fn refresh(cfg: &crate::DiscordCfg) -> Option<(String, String)> {
-    use std::process::{Command, Stdio};
+/// Discord's OAuth2 token endpoint, split the way WinHTTP wants it.
+const TOKEN_HOST: &str = "discord.com";
+const TOKEN_PATH: &str = "/api/oauth2/token";
 
+/// Trade the refresh token for a fresh access token, returning
+/// `(access_token, refresh_token)` on success.
+///
+/// Any failure returns None with a log line and leaves the caller's tokens
+/// as-is, so a transient network problem never clobbers a still-valid token.
+pub fn refresh(cfg: &crate::DiscordCfg) -> Option<(String, String)> {
     if cfg.client_id.is_empty() || cfg.client_secret.is_empty() || cfg.refresh_token.is_empty() {
         return None;
     }
@@ -281,48 +280,175 @@ pub fn refresh(cfg: &crate::DiscordCfg) -> Option<(String, String)> {
         cfg.refresh_token, cfg.client_id, cfg.client_secret
     );
 
-    let mut child = match Command::new("curl")
-        // --max-time so a network stall can't hang daemon startup.
-        .args([
-            "-sS",
-            "--max-time",
-            "15",
-            "-d",
-            "@-",
-            "https://discord.com/api/oauth2/token",
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-    {
-        Ok(c) => c,
+    match http::post_form(TOKEN_HOST, TOKEN_PATH, body.as_bytes()) {
+        Ok(response) => parse_refresh_response(&response),
         Err(e) => {
-            logerr!("discord token refresh: could not run curl: {e}");
-            return None;
+            logerr!("discord token refresh: {e}");
+            None
         }
-    };
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(body.as_bytes());
-        // stdin drops here, closing the pipe so curl sends the request.
     }
-    let out = match child.wait_with_output() {
-        Ok(o) => o,
-        Err(e) => {
-            logerr!("discord token refresh: curl failed: {e}");
-            return None;
+}
+
+/// One HTTPS POST, which is the entire network surface of this program.
+///
+/// Windows does it through WinHTTP, from a crate already in the tree: the OS
+/// supplies TLS and the root store, and nothing is spawned - which matters
+/// because the daemon is a GUI-subsystem process, so any console child it
+/// starts gets a window flashed on screen. Deliberately not an HTTP client
+/// crate; `reqwest` alone would be an async runtime and a hundred-odd
+/// dependencies for one request every six days.
+///
+/// The response body is returned whatever the status code, because that is
+/// where Discord puts its `{"error", "error_description"}` explanation.
+#[cfg(windows)]
+mod http {
+    use windows::core::PCWSTR;
+    use windows::Win32::Networking::WinHttp::*;
+
+    /// Closes its handle on the way out of any path, including the early
+    /// returns below - there are five of them and WinHTTP handles are not
+    /// something to unwind by hand.
+    struct Handle(*mut core::ffi::c_void);
+
+    impl Drop for Handle {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                unsafe {
+                    let _ = WinHttpCloseHandle(self.0);
+                }
+            }
         }
-    };
-    if !out.status.success() {
-        logerr!(
-            "discord token refresh: curl exited {}: {}",
-            out.status,
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-        return None;
     }
 
-    parse_refresh_response(&out.stdout)
+    fn wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(Some(0)).collect()
+    }
+
+    pub fn post_form(host: &str, path: &str, body: &[u8]) -> Result<Vec<u8>, String> {
+        let host_w = wide(host);
+        let path_w = wide(path);
+        unsafe {
+            let session = Handle(WinHttpOpen(
+                windows::core::w!("invisible-ptt"),
+                // Honour whatever proxy Windows is configured with, rather
+                // than assuming a direct connection.
+                WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+                None,
+                None,
+                0,
+            ));
+            if session.0.is_null() {
+                return Err(format!("WinHttpOpen failed: {}", last_error()));
+            }
+            // The old curl call had --max-time 15 so a stalled network could
+            // not hang startup. These are the same budget, per phase.
+            let _ = WinHttpSetTimeouts(session.0, 5_000, 5_000, 5_000, 15_000);
+
+            let connect = Handle(WinHttpConnect(
+                session.0,
+                PCWSTR(host_w.as_ptr()),
+                INTERNET_DEFAULT_HTTPS_PORT,
+                0,
+            ));
+            if connect.0.is_null() {
+                return Err(format!("WinHttpConnect failed: {}", last_error()));
+            }
+
+            let request = Handle(WinHttpOpenRequest(
+                connect.0,
+                windows::core::w!("POST"),
+                PCWSTR(path_w.as_ptr()),
+                None,
+                PCWSTR::null(),
+                std::ptr::null(),
+                // WINHTTP_FLAG_SECURE is what makes this HTTPS. Without it the
+                // client secret would go out in the clear.
+                WINHTTP_FLAG_SECURE,
+            ));
+            if request.0.is_null() {
+                return Err(format!("WinHttpOpenRequest failed: {}", last_error()));
+            }
+
+            let headers = wide("Content-Type: application/x-www-form-urlencoded");
+            // Trailing NUL excluded: WinHTTP takes the length in characters.
+            let headers = &headers[..headers.len() - 1];
+            WinHttpSendRequest(
+                request.0,
+                Some(headers),
+                Some(body.as_ptr() as *const core::ffi::c_void),
+                body.len() as u32,
+                body.len() as u32,
+                0,
+            )
+            .map_err(|e| format!("WinHttpSendRequest failed: {e}"))?;
+
+            WinHttpReceiveResponse(request.0, std::ptr::null_mut())
+                .map_err(|e| format!("WinHttpReceiveResponse failed: {e}"))?;
+
+            let mut response = Vec::new();
+            let mut chunk = [0u8; 4096];
+            loop {
+                let mut read = 0u32;
+                WinHttpReadData(
+                    request.0,
+                    chunk.as_mut_ptr() as *mut core::ffi::c_void,
+                    chunk.len() as u32,
+                    &mut read,
+                )
+                .map_err(|e| format!("WinHttpReadData failed: {e}"))?;
+                if read == 0 {
+                    break;
+                }
+                response.extend_from_slice(&chunk[..read as usize]);
+                // A token response is a few hundred bytes; anything larger is
+                // not something we should keep reading into memory.
+                if response.len() > 1 << 20 {
+                    break;
+                }
+            }
+            Ok(response)
+        }
+    }
+
+    fn last_error() -> String {
+        windows::core::Error::from_win32().to_string()
+    }
+}
+
+/// The Linux smoke-test build keeps shelling out to curl: WinHTTP does not
+/// exist there, and this half of the program is only ever exercised by hand.
+#[cfg(not(windows))]
+mod http {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    pub fn post_form(host: &str, path: &str, body: &[u8]) -> Result<Vec<u8>, String> {
+        // Over stdin, never argv, so the client secret stays out of the
+        // process listing.
+        let mut child = Command::new("curl")
+            .args(["-sS", "--max-time", "15", "-d", "@-"])
+            .arg(format!("https://{host}{path}"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("could not run curl: {e}"))?;
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(body);
+            // stdin drops here, closing the pipe so curl sends the request.
+        }
+        let out = child
+            .wait_with_output()
+            .map_err(|e| format!("curl failed: {e}"))?;
+        if !out.status.success() {
+            return Err(format!(
+                "curl exited {}: {}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+        Ok(out.stdout)
+    }
 }
 
 /// Pull `(access_token, refresh_token)` out of Discord's token-endpoint JSON.
@@ -381,6 +507,26 @@ pub fn persist_tokens(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The one test that actually goes out to the internet, so it does not run
+    /// by default: `cargo test -- --ignored`. Worth running after touching
+    /// anything in `http`, because a broken refresh is invisible until a token
+    /// expires a week later and push-to-talk quietly stops working.
+    #[test]
+    #[ignore = "makes a real request to Discord's token endpoint"]
+    fn post_form_reaches_discords_token_endpoint() {
+        let body = b"grant_type=refresh_token&refresh_token=x&client_id=x&client_secret=x";
+        let response = http::post_form(TOKEN_HOST, TOKEN_PATH, body).expect("the request itself");
+        // Discord rejects the junk credentials, and that rejection is the
+        // proof: the request was formed, sent over TLS, and answered with a
+        // body we could read. Which *shape* of refusal it picks is Discord's
+        // business - it has more than one - so assert only that we got JSON
+        // back and that no tokens came out of it.
+        let json: serde_json::Value = serde_json::from_slice(&response)
+            .unwrap_or_else(|e| panic!("not JSON: {e}: {}", String::from_utf8_lossy(&response)));
+        assert!(json.is_object(), "unexpected response: {json}");
+        assert_eq!(parse_refresh_response(&response), None);
+    }
 
     #[test]
     fn parse_refresh_response_extracts_both_tokens() {

@@ -195,11 +195,26 @@ notification-area icon whose menu is the entire user interface (`src/tray.rs`).
   throttle and leave the user stuck muted or open.
 - **Discord access tokens expire after 7 days.** The daemon refreshes via the
   OAuth refresh token: at startup and every ~6 days it POSTs
-  `grant_type=refresh_token` (shelling out to `curl`), then rewrites the rotated
+  `grant_type=refresh_token`, then rewrites the rotated
   `access_token`/`refresh_token` into `config.toml` with `toml_edit` (comments
   preserved, temp-file + rename). Needs `client_secret` + `refresh_token` in
   config. Refresh tokens rotate and are single-use, so a failed *persist* after a
   successful refresh is the dangerous case — hence the atomic write.
+- **That POST is the program's entire network surface, and it goes through
+  WinHTTP** (`discord::http`), from the `windows` crate already in the tree —
+  the OS supplies TLS and the root store. It used to shell out to `curl`, which
+  worked until the daemon became a GUI-subsystem process: Windows gives a
+  console child its own console, so a cmd window flashed on screen at every
+  refresh. `CREATE_NO_WINDOW` would have papered over it; spawning nothing
+  removes the cause. **Do not reach for an HTTP crate here** — `reqwest` alone
+  is an async runtime and ~100 dependencies for one request every six days.
+  Linux keeps the curl path, since WinHTTP does not exist there and that build
+  is smoke-test only.
+- **The refresh has a network test, `#[ignore]`d.** `cargo test -- --ignored`
+  posts junk credentials to the real endpoint and asserts Discord answers with
+  JSON containing no tokens. Run it after touching `discord::http`: a broken
+  refresh is invisible until a token expires a week later and PTT quietly
+  stops. CI never depends on the network.
 - Any change to `SetMouseButtonMapping` semantics risks bricking mouse input
   until replug. Always test with a second pointing device available.
 
@@ -224,6 +239,7 @@ user but is not yet fully verified end-to-end (see the table below).
 | Wake-driven reassert via `0x1D4B` WirelessDeviceStatus | **Confirmed 2026-08-13** — feature present over the Lightspeed receiver on Windows; broadcasts on wake from **both** a power-cycle and a ~6min idle-sleep, and recovery (mapping + F13) is instant. Fires ~twice per wake; `apply()` is idempotent so the second is a harmless no-op. Reachability logging is edge-triggered (`lost the mouse; waiting for it to come back...` once on the falling edge), so a long sleep no longer spams the log |
 | Per-app `key:` rule + foreground detection | **Confirmed 2026-08-13** — `chrome.exe`→`key:V` sends V only while Chrome is focused, F13 default elsewhere. Confirms `platform::foreground_process()` returns the real exe name on Windows (was previously only known not to crash) and the case-insensitive exact-match rule logic |
 | Discord `rpc` action (mute-toggle PTT over local pipe) | **Confirmed 2026-08-13** — user runs `default_action = "rpc"`; mute-toggle PTT works over the local IPC pipe |
+| Token refresh over WinHTTP (replacing `curl`) | **Confirmed 2026-08-14** — twice over. `cargo test -- --ignored` posted junk credentials to the live endpoint and Discord answered `{"client_id": ["Value \"x\" is not snowflake."]}`, proving DNS, TLS, the form body, and the response read; then the user ran the daemon with real credentials and the startup refresh minted a token as before. No cmd window either way: nothing is spawned to have one |
 | Discord token auto-refresh (7-day expiry) | **Confirmed 2026-08-13** — startup refresh mints a fresh access_token, rotates the refresh_token, and rewrites `config.toml` in place with comments intact. The ~6-day periodic refresh and the auth-error log path share this same code but were not independently triggered |
 | State readback via `GetMode` + `GetMouseButtonMapping` | **Confirmed 2026-08-14** — both getters answer in *either* mode. Steady state reads `mode=02 (host), mapping=[01 02 03 00 05]`; after an idle-sleep the wake probe read `mode=01 (onboard), mapping=[01 02 03 04 05]`, i.e. the mouse falls all the way back to the factory profile, which is what makes the mapping a sound stand-in for the unreadable spy state. A failed read also precedes `lost the mouse`, so it doubles as the liveness check. Firmware returns exactly the configured span, no padding |
 | Read-gated reassert (poll writes only on divergence) | **Confirmed 2026-08-14** — a session covering a power-cycle toggle and a 5min idle-sleep produced zero `mouse forgot its configuration` lines, i.e. the poll read "as configured" every time and never wrote; startup's post-apply verification stayed silent; the wake path still recovers twice per wake and PTT still fires afterwards. The divergence branch itself (probe disagrees → `apply()`) has **not** been triggered on hardware: the wake event beat the poll to every reset in this run, which is the fallback working as intended but leaves that branch exercised only by unit tests |
