@@ -110,6 +110,19 @@ With the program running, press the back button:
 onboard profile. Unplugging the receiver does the same, since both settings are
 volatile.
 
+## The tray icon
+
+The icon says what the daemon is doing, by shape as much as by colour:
+
+| | |
+|---|---|
+| grey ring | waiting for the mouse — it has not turned up yet, or it went away |
+| blue ring with a dot | ready: the button is hijacked and being watched |
+| solid green circle | the button is down and its action is firing |
+
+Hover for the same thing in words. A button configured with `none` stays blue
+while held, because nothing is being transmitted.
+
 ## The tray menu
 
 Right-click (or left-click) the icon:

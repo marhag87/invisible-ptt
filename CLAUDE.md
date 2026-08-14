@@ -168,6 +168,20 @@ notification-area icon whose menu is the entire user interface (`src/tray.rs`).
 - The icon is drawn pixel-by-pixel in `make_icon()` so the repo carries no
   binary asset; the shape is symmetric because `CreateIcon`'s expected row
   order is not worth being sure about.
+- **The icon shows status, and the input loop drives it by posting, not
+  calling.** Three of them (`tray::Status`: grey ring = no mouse, blue
+  ring+dot = ready, green disc = the button is down with a real action), all
+  drawn at startup and swapped with `NIM_MODIFY`. The loop calls
+  `Tray::set_status` on *every* pass with a status recomputed from `connected`
+  / `held` / `active` — recomputed centrally rather than at each of the dozen
+  places those change, since missing one leaves a green icon on a mouse that
+  has gone. It is cheap (an atomic compare) and it never blocks: a direct
+  `Shell_NotifyIconW` would have to run on the tray thread, which may be parked
+  inside `TrackPopupMenu` with a menu open, and no button press may wait for a
+  user to close a menu. `Action::None` is deliberately *not* green — the inert
+  starter config would otherwise claim to transmit on the very first press.
+  `icon_data()` reads the current status rather than taking one, so NIM_ADD,
+  NIM_MODIFY and the Explorer-restart re-add cannot disagree about what is up.
 
 ## Gotchas
 
@@ -182,6 +196,13 @@ notification-area icon whose menu is the entire user interface (`src/tray.rs`).
   the daemon writes nothing to the mouse at all. **Do not restore an
   unconditional periodic `apply()`** — see the gate below for why every avoidable
   write was worth removing.
+- **A failed read asks the poll to run early, it does not decide anything.**
+  `check_now` in `main.rs` pulls the next poll forward when `next_event`
+  errors, because an unplugged receiver is the one case nothing broadcasts and
+  the icon would otherwise claim to be listening for up to 30s. It is only set
+  while `connected` is still true, so a genuine absence falls back to the slow
+  cadence instead of re-enumerating every HID device on the machine five times
+  a second.
 - **Reassert must never fire while a button is held.** Re-sending the mapping
   (`apply()`) glitches a physically-held button into a momentary release —
   confirmed 2026-08-13 as interrupted hold-to-fire in games, and *only* with the
@@ -264,7 +285,8 @@ user but is not yet fully verified end-to-end (see the table below).
 | Reload settings applies an edited config in place | **Confirmed 2026-08-14** — by the user, on hardware: edited config, Reload, new mapping in effect with no restart |
 | Installer builds and installs | **Confirmed 2026-08-14** — CI compiles the script (Inno Setup 6.7.1 on the runner; it is deliberately not installed on the dev machine, so `iscc` only ever runs there) and the resulting setup exe installs and runs. `MB_DEFBUTTON2` and the extensionless `LICENSE` as `LicenseFile` were both fine. Two failures on the way, both worth not repeating: ISPP reads *any* line whose first non-blank character is `#` as a directive, so a wrapped Pascal string continued with `#13#10` aborts the compile; and `choco install` is a no-op against an already-installed older version, which is the one case that step exists for, so it must be `choco upgrade` |
 | Uninstaller stops a running daemon | **Confirmed 2026-08-14** — uninstalled with the daemon running and a button disabled; it closed and the button navigated again afterwards. This is also the only confirmation of the `WM_CLOSE` handling, since `InitializeUninstall` posting `WM_CLOSE` to the tray window is what exercises it: the button coming back proves the message reached the input loop and not just the tray thread. The first attempt did nothing, because `CloseApplications` is a **Setup** directive that the uninstaller never consults — enabling it is precisely what argued the uninstall-side check away. `WM_QUERYENDSESSION` shares the handler but was not independently triggered, so sign-out restore is inferred, not seen |
-| Tray: the icon's appearance | **Not verified** — whether `CreateIcon` drew a dot in a ring or quietly fell back to the generic app icon (32bpp DDB, expected row order is an assumption) |
+| Tray: the icon's appearance | **Confirmed 2026-08-14** — implied by the row below: a `CreateIcon` that had fallen back to the generic app icon would show the *same* image in all three states, so an icon that visibly changes is an icon that was drawn. The 32bpp DDB and the assumed row order are therefore both fine |
+| Tray: the icon changes with status | **Confirmed 2026-08-14** — by the user, as "working as intended", so `NIM_MODIFY` from the posted `WM_TRAY_STATUS` reaches the shell. Which of the three states were watched individually is not recorded; grey needs an absent mouse and green needs a held button with a real action |
 | Reassert does not interrupt held buttons | **Confirmed 2026-08-13** — the periodic `apply()` was glitching a held left button into a brief release (interrupted hold-to-fire, daemon-only). Fixed by gating the reassert on no-button-held + 500ms quiet; verified with a 2s-interval build holding left through ~10 reasserts with zero interruptions. Also confirms the spy reports the passthrough left button |
 
 ### Review changes — what has been re-verified

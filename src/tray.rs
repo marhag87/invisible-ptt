@@ -15,6 +15,25 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
+/// What the icon is currently saying. The daemon has no window, so this and
+/// the log are the only places its state is visible at all.
+///
+/// Deliberately three, and deliberately distinguished by *shape* as well as
+/// colour: a 32x32 icon on a taskbar is small, and a colour-only difference is
+/// no difference to anyone who cannot see it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u8)]
+// Same as Controls: the Linux stub takes a Status and ignores it.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub enum Status {
+    /// No mouse. Either it has not enumerated yet (sign-in) or it went away.
+    Waiting = 0,
+    /// Configured and listening for the button.
+    Ready = 1,
+    /// The button is down and its action is asserted.
+    Talking = 2,
+}
+
 /// What the menu is allowed to drive.
 ///
 /// Reload sends a config rather than a signal: parsing happens here, on the
@@ -38,10 +57,11 @@ pub use imp::{spawn, Tray};
 
 #[cfg(windows)]
 mod imp {
-    use super::Controls;
+    use super::{Controls, Status};
+    use std::cell::Cell;
     use std::os::windows::ffi::OsStrExt;
     use std::path::Path;
-    use std::sync::atomic::Ordering;
+    use std::sync::atomic::{AtomicU8, Ordering};
     use std::sync::mpsc;
     use std::sync::OnceLock;
     use windows::core::{w, PCWSTR};
@@ -54,7 +74,7 @@ mod imp {
     };
     use windows::Win32::UI::Shell::{
         FindExecutableW, ShellExecuteW, Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD,
-        NIM_DELETE, NOTIFYICONDATAW,
+        NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW,
     };
     use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -69,6 +89,11 @@ mod imp {
     /// window procedure. Keeping them separate is what lets the icon stay up
     /// until the restore is actually done.
     const WM_TRAY_QUIT: u32 = WM_APP + 2;
+
+    /// Change the icon. Posted by `Tray::set_status` from the input loop, in
+    /// wparam, because `Shell_NotifyIconW` belongs to the thread that owns the
+    /// window and the input loop must not wait on anything the tray is doing.
+    const WM_TRAY_STATUS: u32 = WM_APP + 3;
 
     // Menu command ids. 0 is reserved: TrackPopupMenu returns it for "the user
     // clicked away", so no item may use it.
@@ -85,7 +110,18 @@ mod imp {
     /// procedure through GWLP_USERDATA.
     struct State {
         controls: Controls,
-        icon: HICON,
+        /// One per Status, drawn up front: swapping the icon has to be cheap,
+        /// and it happens on every press and release.
+        icons: [HICON; 3],
+        /// Which one is showing. A Cell rather than an atomic because only the
+        /// tray thread ever touches it - the input loop posts a message.
+        status: Cell<Status>,
+    }
+
+    impl State {
+        fn icon(&self) -> HICON {
+            self.icons[self.status.get() as usize]
+        }
     }
 
     pub struct Tray {
@@ -93,6 +129,9 @@ mod imp {
         /// 0 when the tray failed to start, in which case the daemon simply
         /// runs without a menu rather than not running at all.
         hwnd: isize,
+        /// What we last asked for, so `set_status` can be called from the loop
+        /// unconditionally and still post nothing in the usual case.
+        shown: AtomicU8,
         thread: Option<std::thread::JoinHandle<()>>,
     }
 
@@ -105,11 +144,35 @@ mod imp {
         let hwnd = started.recv().unwrap_or(0);
         Tray {
             hwnd,
+            shown: AtomicU8::new(Status::Waiting as u8),
             thread: Some(thread),
         }
     }
 
     impl Tray {
+        /// Show a different icon, if it is not the one already up.
+        ///
+        /// Called from the input loop on every pass, so the common case must
+        /// cost nothing: one atomic swap, and a posted message only when the
+        /// status has actually changed. Posting rather than calling because
+        /// the shell wants `Shell_NotifyIconW` from the window's own thread,
+        /// and because a post never blocks - the tray could be sitting inside
+        /// `TrackPopupMenu` with a menu open, and a button press must not wait
+        /// for the user to close it.
+        pub fn set_status(&self, status: Status) {
+            if self.hwnd == 0 || self.shown.swap(status as u8, Ordering::Relaxed) == status as u8 {
+                return;
+            }
+            unsafe {
+                let _ = PostMessageW(
+                    HWND(self.hwnd as *mut std::ffi::c_void),
+                    WM_TRAY_STATUS,
+                    WPARAM(status as usize),
+                    LPARAM(0),
+                );
+            }
+        }
+
         /// Take the icon down and wait for the thread. Called on the way out,
         /// so the tray never outlives the daemon as a ghost icon that only
         /// disappears when the user waves the mouse over it.
@@ -146,9 +209,16 @@ mod imp {
         };
         RegisterClassW(&wc);
 
+        // Waiting to begin with: the daemon spawns the tray before it goes
+        // looking for the mouse, so that is genuinely where it starts.
         let state = Box::into_raw(Box::new(State {
             controls,
-            icon: make_icon(instance),
+            icons: [
+                make_icon(instance, Status::Waiting),
+                make_icon(instance, Status::Ready),
+                make_icon(instance, Status::Talking),
+            ],
+            status: Cell::new(Status::Waiting),
         }));
         // A message-only window (HWND_MESSAGE) would be tidier, but the tray
         // needs a window that can be brought to the foreground for the menu.
@@ -176,7 +246,7 @@ mod imp {
             }
         };
 
-        let nid = icon_data(hwnd, (*state).icon);
+        let nid = icon_data(hwnd, &*state);
         if !Shell_NotifyIconW(NIM_ADD, &nid).as_bool() {
             logerr!("tray: the shell refused the icon; running without it");
         }
@@ -190,7 +260,9 @@ mod imp {
 
         let _ = Shell_NotifyIconW(NIM_DELETE, &nid);
         let state = Box::from_raw(state);
-        let _ = DestroyIcon(state.icon);
+        for icon in state.icons {
+            let _ = DestroyIcon(icon);
+        }
         CoUninitialize();
     }
 
@@ -205,7 +277,7 @@ mod imp {
         let restarted = taskbar_created();
         if restarted != 0 && msg == restarted {
             if let Some(state) = state(hwnd) {
-                let _ = Shell_NotifyIconW(NIM_ADD, &icon_data(hwnd, state.icon));
+                let _ = Shell_NotifyIconW(NIM_ADD, &icon_data(hwnd, state));
             }
             return LRESULT(0);
         }
@@ -254,6 +326,15 @@ mod imp {
             WM_QUERYENDSESSION => {
                 stop(hwnd);
                 LRESULT(1)
+            }
+            // The input loop's status changed. wparam is the new Status; a
+            // value from anywhere else is not one, so check before indexing.
+            WM_TRAY_STATUS => {
+                if let (Some(state), Some(status)) = (state(hwnd), status_from(wparam)) {
+                    state.status.set(status);
+                    let _ = Shell_NotifyIconW(NIM_MODIFY, &icon_data(hwnd, state));
+                }
+                LRESULT(0)
             }
             WM_TRAY_QUIT => {
                 let _ = DestroyWindow(hwnd);
@@ -336,20 +417,41 @@ mod imp {
         let _ = PostMessageW(hwnd, WM_NULL, WPARAM(0), LPARAM(0));
     }
 
-    fn icon_data(hwnd: HWND, icon: HICON) -> NOTIFYICONDATAW {
+    /// The icon and tooltip for the state we are currently in. Used for the
+    /// initial NIM_ADD, for every status change, and to put the icon back when
+    /// Explorer restarts - which is why it reads the status rather than taking
+    /// one: those three must never disagree about what is showing.
+    fn icon_data(hwnd: HWND, state: &State) -> NOTIFYICONDATAW {
         let mut nid = NOTIFYICONDATAW {
             cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
             hWnd: hwnd,
             uID: 1,
             uFlags: NIF_ICON | NIF_MESSAGE | NIF_TIP,
             uCallbackMessage: WM_TRAY,
-            hIcon: icon,
+            hIcon: state.icon(),
             ..Default::default()
         };
-        for (slot, ch) in nid.szTip.iter_mut().zip("invisible-ptt".encode_utf16()) {
+        // The tooltip carries the same three states in words, for the icon
+        // that is 16 pixels across by the time the shell has scaled it.
+        let tip = match state.status.get() {
+            Status::Waiting => "invisible-ptt - waiting for the mouse",
+            Status::Ready => "invisible-ptt - ready",
+            Status::Talking => "invisible-ptt - talking",
+        };
+        for (slot, ch) in nid.szTip.iter_mut().zip(tip.encode_utf16()) {
             *slot = ch;
         }
         nid
+    }
+
+    /// wparam back into a Status, rejecting anything else.
+    fn status_from(wparam: WPARAM) -> Option<Status> {
+        match wparam.0 {
+            0 => Some(Status::Waiting),
+            1 => Some(Status::Ready),
+            2 => Some(Status::Talking),
+            _ => None,
+        }
     }
 
     /// Broadcast by the shell when the taskbar is recreated.
@@ -514,14 +616,24 @@ mod imp {
             .collect()
     }
 
-    /// A 32x32 icon drawn in code: a dot inside a ring.
+    /// A 32x32 icon drawn in code, one per status: a hollow ring while there
+    /// is no mouse, a dot inside that ring once it is armed, a filled disc
+    /// while the button is down.
     ///
-    /// No image file in the repo, and no orientation to get wrong - the shape
-    /// is symmetric, which matters because the bitmap row order CreateIcon
-    /// expects is not something to have to be sure about. Mid-blue so it is
-    /// legible on both a light and a dark taskbar.
-    unsafe fn make_icon(instance: HINSTANCE) -> HICON {
+    /// No image file in the repo, and no orientation to get wrong - every
+    /// shape is symmetric, which matters because the bitmap row order
+    /// CreateIcon expects is not something to have to be sure about. The
+    /// colours are mid-tones so they stay legible on a light *and* a dark
+    /// taskbar, and they are never the only difference between two states:
+    /// this is a 16-pixel image once the shell has finished with it, and
+    /// telling blue from green at that size is not something to require.
+    unsafe fn make_icon(instance: HINSTANCE, status: Status) -> HICON {
         const N: usize = 32;
+        let (r, g, b) = match status {
+            Status::Waiting => (0x8au8, 0x8au8, 0x8au8), // grey: nothing to talk to
+            Status::Ready => (0x2e, 0x9b, 0xf0),         // blue: armed and waiting
+            Status::Talking => (0x3d, 0xc2, 0x5f),       // green: transmitting
+        };
         // The AND mask is 1 bit per pixel and selects transparency: 1 leaves
         // the background, 0 draws the colour from the XOR bitmap.
         let mut mask = [0xffu8; N * N / 8];
@@ -530,14 +642,20 @@ mod imp {
             for x in 0..N {
                 let dx = x as f32 - 15.5;
                 let dy = y as f32 - 15.5;
-                let r = (dx * dx + dy * dy).sqrt();
-                if !(r <= 7.0 || (11.0..=14.5).contains(&r)) {
+                let dist = (dx * dx + dy * dy).sqrt();
+                let ring = (11.0..=14.5).contains(&dist);
+                let ink = match status {
+                    Status::Waiting => ring,
+                    Status::Ready => ring || dist <= 7.0,
+                    Status::Talking => dist <= 14.5,
+                };
+                if !ink {
                     continue;
                 }
                 let px = (y * N + x) * 4;
-                colour[px] = 0xf0; // B
-                colour[px + 1] = 0x9b; // G
-                colour[px + 2] = 0x2e; // R
+                colour[px] = b;
+                colour[px + 1] = g;
+                colour[px + 2] = r;
                 colour[px + 3] = 0xff; // A
                 let bit = y * N + x;
                 mask[bit / 8] &= !(0x80 >> (bit % 8));
@@ -558,7 +676,7 @@ mod imp {
 
 #[cfg(not(windows))]
 mod imp {
-    use super::Controls;
+    use super::{Controls, Status};
 
     /// There is no tray on the Linux side; the daemon runs headless there, as
     /// it always has. See platform.rs for the same arrangement.
@@ -569,6 +687,8 @@ mod imp {
     }
 
     impl Tray {
+        /// Nowhere to show it. The status is on stdout there anyway.
+        pub fn set_status(&self, _status: Status) {}
         pub fn shutdown(self) {}
     }
 }

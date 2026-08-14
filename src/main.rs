@@ -487,6 +487,12 @@ fn main() {
         log: log_path,
     });
 
+    // Where the icon starts anyway, said out loud because this is the one
+    // place it stays for any length of time: at sign-in the receiver has
+    // routinely not enumerated yet, and a grey icon is the only thing telling
+    // the user the wait is the mouse's and not the daemon's.
+    tray.set_status(tray::Status::Waiting);
+
     let mut dev = match connect_when_available(&api, &cfg, &running) {
         Some(dev) => dev,
         None => {
@@ -505,8 +511,15 @@ fn main() {
     let mut active: Action = Action::None;
     let mut last_poll = Instant::now();
     // Tracks reachability so the poll only logs on the transition, not every
-    // failed attempt while the mouse is away.
+    // failed attempt while the mouse is away. Also what the icon shows.
     let mut connected = true;
+    // Something suggested the mouse may have gone, so run the fallback poll on
+    // the next pass instead of up to 30s later. Only ever set while we still
+    // believe we are connected: once the poll agrees the mouse is gone, going
+    // back to the slow cadence is what keeps a long absence from re-enumerating
+    // every HID device on the machine several times a second. A false alarm
+    // costs two reads and changes nothing.
+    let mut check_now = false;
     // Full physical button bitmask from the last spy event, plus when we last
     // saw any button activity. Re-sending the button mapping glitches a held
     // button into a momentary release - catastrophic mid-game (e.g. an
@@ -532,6 +545,25 @@ fn main() {
     log!("running - Exit from the tray menu stops and restores the mouse");
 
     while running.load(Ordering::SeqCst) {
+        // Recomputed here rather than at each of the places these change,
+        // because there are a dozen of those - every release() call site, both
+        // reconnect paths - and one of them would eventually be missed, leaving
+        // a green icon on a mouse that had gone away. The loop comes back
+        // through here within its 100ms event timeout, and immediately after
+        // handling a press or a release, so "immediate" is what this looks
+        // like. `set_status` costs an atomic compare when nothing has changed.
+        //
+        // An action of `none` is deliberately not Talking: the button is down,
+        // but nothing is being transmitted, and an icon that says otherwise on
+        // the inert starter config would be a lie on the very first run.
+        tray.set_status(if !connected {
+            tray::Status::Waiting
+        } else if held && active != Action::None {
+            tray::Status::Talking
+        } else {
+            tray::Status::Ready
+        });
+
         // Reload settings, from the tray. It arrives already parsed and
         // validated - a bad file never gets this far, and the running
         // configuration survives it untouched.
@@ -607,11 +639,12 @@ fn main() {
         // Deferring is safe: an active session keeps the mouse awake, so it
         // hasn't forgotten anything, and the wake event covers the cases where
         // it has.
-        if last_poll.elapsed() > interval
+        if (check_now || last_poll.elapsed() > interval)
             && button_state == 0
             && last_button_event.elapsed() > Duration::from_millis(500)
         {
             last_poll = Instant::now();
+            check_now = false;
             // Read before writing. In steady state the mouse still holds
             // everything we asked for, so this writes nothing at all - which is
             // the point. The gate above is checked before apply() sends its
@@ -664,6 +697,12 @@ fn main() {
                 // so end the hold ourselves rather than leave it open.
                 button_state = 0;
                 release(&mut held, &mut active, &discord);
+                // Have the poll confirm it now rather than at its own pace: an
+                // unplugged receiver is exactly the case that never broadcasts
+                // anything, and until the poll runs the icon still claims to be
+                // listening. It is the poll that decides - a single failed read
+                // is not evidence enough to grey out an icon by itself.
+                check_now = connected;
                 std::thread::sleep(Duration::from_millis(200));
                 continue;
             }
