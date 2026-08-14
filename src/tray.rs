@@ -15,24 +15,10 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-/// What the icon is currently saying. The daemon has no window, so this and
-/// the log are the only places its state is visible at all.
-///
-/// Deliberately three, and deliberately distinguished by *shape* as well as
-/// colour: a 32x32 icon on a taskbar is small, and a colour-only difference is
-/// no difference to anyone who cannot see it.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-#[repr(u8)]
-// Same as Controls: the Linux stub takes a Status and ignores it.
-#[cfg_attr(not(windows), allow(dead_code))]
-pub enum Status {
-    /// No mouse. Either it has not enumerated yet (sign-in) or it went away.
-    Waiting = 0,
-    /// Configured and listening for the button.
-    Ready = 1,
-    /// The button is down and its action is asserted.
-    Talking = 2,
-}
+// Status lives in `icon`, next to the shapes it names, because build.rs needs
+// it too and cannot reach into this crate. `tray::Status` stays the spelling
+// everywhere else.
+pub use crate::icon::Status;
 
 /// What the menu is allowed to drive.
 ///
@@ -616,49 +602,28 @@ mod imp {
             .collect()
     }
 
-    /// A 32x32 icon drawn in code, one per status: a hollow ring while there
-    /// is no mouse, a dot inside that ring once it is armed, a filled disc
-    /// while the button is down.
+    /// A 32x32 icon per status, from the shapes in `crate::icon` - the same
+    /// ones build.rs bakes into the exe, so the notification area and the
+    /// Start menu cannot end up showing two different programs.
     ///
-    /// No image file in the repo, and no orientation to get wrong - every
-    /// shape is symmetric, which matters because the bitmap row order
-    /// CreateIcon expects is not something to have to be sure about. The
-    /// colours are mid-tones so they stay legible on a light *and* a dark
-    /// taskbar, and they are never the only difference between two states:
-    /// this is a 16-pixel image once the shell has finished with it, and
-    /// telling blue from green at that size is not something to require.
+    /// The coverage `icon::bgra` returns is thresholded rather than blended:
+    /// `CreateIcon` takes a device-*dependent* bitmap, and whether it reads
+    /// the alpha channel at all is not worth depending on, whereas the AND
+    /// mask has meant transparency since Windows 3. 1 leaves the background,
+    /// 0 draws the pixel - so this is the one place the sense is inverted.
+    /// The result is what a point-sampled rasteriser would have drawn, which
+    /// is what this was before the shapes had to serve two callers.
     unsafe fn make_icon(instance: HINSTANCE, status: Status) -> HICON {
-        const N: usize = 32;
-        let (r, g, b) = match status {
-            Status::Waiting => (0x8au8, 0x8au8, 0x8au8), // grey: nothing to talk to
-            Status::Ready => (0x2e, 0x9b, 0xf0),         // blue: armed and waiting
-            Status::Talking => (0x3d, 0xc2, 0x5f),       // green: transmitting
-        };
-        // The AND mask is 1 bit per pixel and selects transparency: 1 leaves
-        // the background, 0 draws the colour from the XOR bitmap.
-        let mut mask = [0xffu8; N * N / 8];
-        let mut colour = [0u8; N * N * 4];
-        for y in 0..N {
-            for x in 0..N {
-                let dx = x as f32 - 15.5;
-                let dy = y as f32 - 15.5;
-                let dist = (dx * dx + dy * dy).sqrt();
-                let ring = (11.0..=14.5).contains(&dist);
-                let ink = match status {
-                    Status::Waiting => ring,
-                    Status::Ready => ring || dist <= 7.0,
-                    Status::Talking => dist <= 14.5,
-                };
-                if !ink {
-                    continue;
-                }
-                let px = (y * N + x) * 4;
-                colour[px] = b;
-                colour[px + 1] = g;
-                colour[px + 2] = r;
-                colour[px + 3] = 0xff; // A
-                let bit = y * N + x;
-                mask[bit / 8] &= !(0x80 >> (bit % 8));
+        const N: u32 = 32;
+        let mut colour = crate::icon::bgra(N, status);
+        let mut mask = [0xffu8; (N * N / 8) as usize];
+        for px in 0..(N * N) as usize {
+            let alpha = &mut colour[px * 4 + 3];
+            if *alpha >= 128 {
+                *alpha = 0xff;
+                mask[px / 8] &= !(0x80 >> (px % 8));
+            } else {
+                colour[px * 4..px * 4 + 4].fill(0);
             }
         }
         CreateIcon(

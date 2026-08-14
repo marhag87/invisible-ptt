@@ -23,6 +23,7 @@
 mod log;
 mod discord;
 mod hidpp;
+mod icon;
 mod platform;
 mod tray;
 

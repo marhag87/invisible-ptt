@@ -123,6 +123,10 @@ The icon says what the daemon is doing, by shape as much as by colour:
 Hover for the same thing in words. A button configured with `none` stays blue
 while held, because nothing is being transmitted.
 
+The blue one is also the program's own icon, in the Start menu, in Explorer and
+in Add/remove programs. Nothing is checked in for it: the shapes are circles,
+drawn in code (`src/icon.rs`), and the build script bakes them into the exe.
+
 ## The tray menu
 
 Right-click (or left-click) the icon:

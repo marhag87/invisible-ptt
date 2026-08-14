@@ -165,9 +165,30 @@ notification-area icon whose menu is the entire user interface (`src/tray.rs`).
   rather than letting the user meet the "How do you want to open this file?"
   chooser. The tray thread also holds a COM apartment, which `ShellExecuteW`
   wants when it delegates to a shell extension.
-- The icon is drawn pixel-by-pixel in `make_icon()` so the repo carries no
-  binary asset; the shape is symmetric because `CreateIcon`'s expected row
-  order is not worth being sure about.
+- **The icon is drawn pixel-by-pixel, and two things draw it.** The shapes live
+  in `src/icon.rs` so the repo carries no binary asset. `tray::make_icon` turns
+  them into the three `HICON`s at runtime; `build.rs` bakes the blue `Ready`
+  one into the exe as an `.ico` resource, which is what the Start menu,
+  Explorer and Add/remove programs read — a `CreateIcon` at runtime is visible
+  to nothing but the running process, so before that the exe had no icon at
+  all and every shell surface showed the generic placeholder. build.rs pulls
+  the module in with `#[path = "src/icon.rs"] mod icon;` (a build script cannot
+  depend on the crate it builds), which is why nothing in that file may name
+  `crate::`. Every shape stays symmetric about both axes: `CreateIcon` wants
+  its rows one way round and a DIB wants them the other, and symmetry means
+  neither has to be got right. `bgra()` supersamples coverage into the alpha
+  channel; the `.ico` path blends it, and `make_icon` thresholds it at 128 into
+  the AND mask instead, because whether `CreateIcon`'s device-*dependent*
+  bitmap honours alpha is not worth depending on.
+- **The `.res` is written by hand, in build.rs.** `link.exe` accepts `.res`
+  files as input and builds the `.rsrc` section itself, so the only missing
+  piece was something to emit one. The alternatives were a crate that shells
+  out to `rc.exe` — another build-time toolchain to have installed, on the dev
+  machine and in CI — or a checked-in binary. The format is a flat list of
+  length-prefixed records and the writer is ~40 lines, same bargain as
+  `src/hidpp.rs`. It is emitted with `cargo:rustc-link-arg-bins` and gated on
+  `CARGO_CFG_TARGET_OS`/`_ENV` being `windows`/`msvc`, so the Linux build (and
+  any `-gnu` target) silently gets no icon rather than a broken link.
 - **The icon shows status, and the input loop drives it by posting, not
   calling.** Three of them (`tray::Status`: grey ring = no mouse, blue
   ring+dot = ready, green disc = the button is down with a real action), all
@@ -285,7 +306,8 @@ user but is not yet fully verified end-to-end (see the table below).
 | Reload settings applies an edited config in place | **Confirmed 2026-08-14** — by the user, on hardware: edited config, Reload, new mapping in effect with no restart |
 | Installer builds and installs | **Confirmed 2026-08-14** — CI compiles the script (Inno Setup 6.7.1 on the runner; it is deliberately not installed on the dev machine, so `iscc` only ever runs there) and the resulting setup exe installs and runs. `MB_DEFBUTTON2` and the extensionless `LICENSE` as `LicenseFile` were both fine. Two failures on the way, both worth not repeating: ISPP reads *any* line whose first non-blank character is `#` as a directive, so a wrapped Pascal string continued with `#13#10` aborts the compile; and `choco install` is a no-op against an already-installed older version, which is the one case that step exists for, so it must be `choco upgrade` |
 | Uninstaller stops a running daemon | **Confirmed 2026-08-14** — uninstalled with the daemon running and a button disabled; it closed and the button navigated again afterwards. This is also the only confirmation of the `WM_CLOSE` handling, since `InitializeUninstall` posting `WM_CLOSE` to the tray window is what exercises it: the button coming back proves the message reached the input loop and not just the tray thread. The first attempt did nothing, because `CloseApplications` is a **Setup** directive that the uninstaller never consults — enabling it is precisely what argued the uninstall-side check away. `WM_QUERYENDSESSION` shares the handler but was not independently triggered, so sign-out restore is inferred, not seen |
-| Tray: the icon's appearance | **Confirmed 2026-08-14** — implied by the row below: a `CreateIcon` that had fallen back to the generic app icon would show the *same* image in all three states, so an icon that visibly changes is an icon that was drawn. The 32bpp DDB and the assumed row order are therefore both fine |
+| Tray: the icon's appearance | **Confirmed 2026-08-14** — implied by the row below: a `CreateIcon` that had fallen back to the generic app icon would show the *same* image in all three states, so an icon that visibly changes is an icon that was drawn. The 32bpp DDB and the assumed row order are therefore both fine. `make_icon` has since been rewritten to take its pixels from `icon::bgra` rather than compute them inline; same centre, same radii, and the 128 threshold reproduces what the old point-sampled loop drew, so this should still hold — but nobody has looked at the icon since |
+| Exe carries an app icon (Start menu, Explorer, Add/remove) | **Confirmed 2026-08-14, on the built exe** — `PrivateExtractIcons` returns a native bitmap at 16, 32, 48 *and* 256 (so the large image is really there, not upscaled), centre pixel exactly `#2E9BF0` — the `Ready` blue — and transparent corners, which the generic placeholder is not. Resource enumeration shows `RT_ICON` 1..8 and a single `RT_GROUP_ICON` id 1, and 17 distinct alpha levels at 256px, i.e. the 4x4 supersampling arrived intact. So the hand-written `.res` is one link.exe accepts and one the shell reads. **Not** confirmed by eye in an actual Start menu — and note Windows caches shell icons, so an install over a previous version may keep showing the old blank one until the cache turns over |
 | Tray: the icon changes with status | **Confirmed 2026-08-14** — by the user, as "working as intended", so `NIM_MODIFY` from the posted `WM_TRAY_STATUS` reaches the shell. Which of the three states were watched individually is not recorded; grey needs an absent mouse and green needs a held button with a real action |
 | Reassert does not interrupt held buttons | **Confirmed 2026-08-13** — the periodic `apply()` was glitching a held left button into a brief release (interrupted hold-to-fire, daemon-only). Fixed by gating the reassert on no-button-held + 500ms quiet; verified with a 2s-interval build holding left through ~10 reasserts with zero interruptions. Also confirms the spy reports the passthrough left button |
 
