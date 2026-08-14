@@ -92,14 +92,31 @@ the receiver does the same — both settings are volatile.
 - **The mapping is volatile.** The mouse forgets it on sleep/power-cycle.
   Recovery is driven by the `0x1D4B` wake event; the periodic poll (30s with the
   wake event, 5s without) is only a backstop.
+- **The poll reads; it does not blindly rewrite.** `Device::probe()` reads the
+  state back with `0x8100` fn2 GetMode and `0x8110` fn3 GetMouseButtonMapping,
+  and `apply()` runs only when that disagrees with the config. In steady state
+  the daemon writes nothing to the mouse at all. **Do not restore an
+  unconditional periodic `apply()`** — see the gate below for why every avoidable
+  write was worth removing.
 - **Reassert must never fire while a button is held.** Re-sending the mapping
   (`apply()`) glitches a physically-held button into a momentary release —
   confirmed 2026-08-13 as interrupted hold-to-fire in games, and *only* with the
-  daemon running. The reassert is therefore gated to run solely when no button is
+  daemon running. Writes are therefore gated to run solely when no button is
   down and input has been quiet 500ms (`main.rs`, `button_state` /
   `last_button_event`). **Do not remove that gate.** It relies on the spy
   reporting every button's raw state, including the passthrough left button
-  (confirmed on hardware).
+  (confirmed on hardware). Note the gate is checked *before* `apply()` sends its
+  round-trips, so a button going down in between is still exposed — narrowing
+  that race is exactly why the poll became a read.
+- **The spy cannot be read back.** `IMouseButtonSpy` stops at fn4: there is no
+  "is the spy armed" getter, so a spy that dropped while mode and mapping
+  survived would be invisible, and PTT would be silently dead until restart.
+  Accepted deliberately: that state has never been observed (the reset that
+  drops the spy takes mode and mapping with it, confirmed 2026-08-14), it is
+  loud when it happens, and the periodic write that would have covered it costs
+  more than it saves. If it ever does show up, the fix is a periodic
+  `StartMouseButtonSpy` *alone* — fn1 does not touch the mapping, so it should
+  not glitch a hold — not a return to the full `apply()`.
 - **Host mode disables onboard profiles.** The DPI *value* survives the switch
   (confirmed 2026-08-13: 800 DPI before and after). Onboard DPI *switching* via a
   DPI button is still untested — this Superlight has none, so it never came up.
@@ -137,6 +154,8 @@ user but is not yet fully verified end-to-end (see the table below).
 | Per-app `key:` rule + foreground detection | **Confirmed 2026-08-13** — `chrome.exe`→`key:V` sends V only while Chrome is focused, F13 default elsewhere. Confirms `platform::foreground_process()` returns the real exe name on Windows (was previously only known not to crash) and the case-insensitive exact-match rule logic |
 | Discord `rpc` action (mute-toggle PTT over local pipe) | **Confirmed 2026-08-13** — user runs `default_action = "rpc"`; mute-toggle PTT works over the local IPC pipe |
 | Discord token auto-refresh (7-day expiry) | **Confirmed 2026-08-13** — startup refresh mints a fresh access_token, rotates the refresh_token, and rewrites `config.toml` in place with comments intact. The ~6-day periodic refresh and the auth-error log path share this same code but were not independently triggered |
+| State readback via `GetMode` + `GetMouseButtonMapping` | **Confirmed 2026-08-14** — both getters answer in *either* mode. Steady state reads `mode=02 (host), mapping=[01 02 03 00 05]`; after an idle-sleep the wake probe read `mode=01 (onboard), mapping=[01 02 03 04 05]`, i.e. the mouse falls all the way back to the factory profile, which is what makes the mapping a sound stand-in for the unreadable spy state. A failed read also precedes `lost the mouse`, so it doubles as the liveness check. Firmware returns exactly the configured span, no padding |
+| Read-gated reassert (poll writes only on divergence) | **Confirmed 2026-08-14** — a session covering a power-cycle toggle and a 5min idle-sleep produced zero `mouse forgot its configuration` lines, i.e. the poll read "as configured" every time and never wrote; startup's post-apply verification stayed silent; the wake path still recovers twice per wake and PTT still fires afterwards. The divergence branch itself (probe disagrees → `apply()`) has **not** been triggered on hardware: the wake event beat the poll to every reset in this run, which is the fallback working as intended but leaves that branch exercised only by unit tests |
 | Reassert does not interrupt held buttons | **Confirmed 2026-08-13** — the periodic `apply()` was glitching a held left button into a brief release (interrupted hold-to-fire, daemon-only). Fixed by gating the reassert on no-button-held + 500ms quiet; verified with a 2s-interval build holding left through ~10 reasserts with zero interruptions. Also confirms the spy reports the passthrough left button |
 
 ### Review changes — what has been re-verified
