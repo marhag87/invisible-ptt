@@ -149,12 +149,17 @@ begin
   RegDeleteValue(HKEY_CURRENT_USER, '{#RunKey}', '{#RunValue}');
 
   { The config holds Discord OAuth tokens, so neither leaving it nor deleting
-    it quietly is the obvious right answer. Ask. }
+    it quietly is the obvious right answer. Ask.
+
+    Note the leading "+" on the continuation lines. The preprocessor runs over
+    this file first and reads any line whose first non-blank character is "#"
+    as a directive, so a wrapped string that starts with #13#10 fails the
+    compile with "Unknown preprocessor directive" - which is what it did. }
   Settings := ExpandConstant('{userappdata}\{#AppName}');
   if DirExists(Settings) then
-    if MsgBox('Delete your settings and log file too?' + #13#10#13#10 + Settings +
-              #13#10#13#10 + 'Keep them if you plan to reinstall. They include ' +
-              'your Discord credentials.',
+    if MsgBox('Delete your settings and log file too?' + #13#10#13#10 + Settings
+              + #13#10#13#10 + 'Keep them if you plan to reinstall. They include '
+              + 'your Discord credentials.',
               mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES then
       DelTree(Settings, True, True, True);
 end;

@@ -17,12 +17,16 @@ outputs:
 runs:
   using: composite
   steps:
-    # The runner image ships an Inno Setup, but not reliably a recent enough
-    # one: the script uses ArchitecturesAllowed=x64compatible, which needs 6.3.
-    # Chocolatey is preinstalled and gives us the current release.
+    # The runner image already ships Inno Setup (6.7.1 on windows-2025 as of
+    # this writing), so this is a no-op safety net for the day an image drops it
+    # or ships something older than the 6.3 that
+    # ArchitecturesAllowed=x64compatible needs. It has to be `upgrade`, not
+    # `install`: given an existing older copy, `choco install` reports "already
+    # installed" and changes nothing, which is exactly the case this step is
+    # here to catch.
     - name: Install Inno Setup
       shell: pwsh
-      run: choco install innosetup --no-progress -y
+      run: choco upgrade innosetup --no-progress -y
 
     - name: Compile
       id: compile
