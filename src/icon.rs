@@ -192,6 +192,10 @@ mod tests {
     #[test]
     fn edges_are_antialiased() {
         let bits = bgra(64, APP);
-        assert!(bits.chunks_exact(4).any(|px| px[3] > 0 && px[3] < 255));
+        assert!(bits
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .any(|px| px[3] > 0 && px[3] < 255));
     }
 }
