@@ -31,6 +31,10 @@ pub use crate::icon::Status;
 #[cfg_attr(not(windows), allow(dead_code))]
 pub struct Controls {
     pub running: Arc<AtomicBool>,
+    /// Set by the Pause item, read by the input loop. Deliberately not
+    /// persisted anywhere: a daemon that came back paused after a reboot would
+    /// look exactly like one that had failed to start.
+    pub paused: Arc<AtomicBool>,
     pub reload: std::sync::mpsc::Sender<crate::Config>,
     pub config: PathBuf,
     pub log: PathBuf,
@@ -87,7 +91,8 @@ mod imp {
     const ID_LOG: usize = 2;
     const ID_RELOAD: usize = 3;
     const ID_AUTOSTART: usize = 4;
-    const ID_EXIT: usize = 5;
+    const ID_PAUSE: usize = 5;
+    const ID_EXIT: usize = 6;
 
     const RUN_KEY: PCWSTR = w!(r"Software\Microsoft\Windows\CurrentVersion\Run");
     const RUN_VALUE: PCWSTR = w!("invisible-ptt");
@@ -98,7 +103,7 @@ mod imp {
         controls: Controls,
         /// One per Status, drawn up front: swapping the icon has to be cheap,
         /// and it happens on every press and release.
-        icons: [HICON; 3],
+        icons: [HICON; 4],
         /// Which one is showing. A Cell rather than an atomic because only the
         /// tray thread ever touches it - the input loop posts a message.
         status: Cell<Status>,
@@ -203,6 +208,7 @@ mod imp {
                 make_icon(instance, Status::Waiting),
                 make_icon(instance, Status::Ready),
                 make_icon(instance, Status::Talking),
+                make_icon(instance, Status::Paused),
             ],
             status: Cell::new(Status::Waiting),
         }));
@@ -357,7 +363,13 @@ mod imp {
         };
         let autostart = autostart_enabled();
         let checked = if autostart { MF_CHECKED } else { MF_UNCHECKED };
+        // Read once here, so the tick and the toggle below cannot disagree
+        // about what the state was when the menu opened.
+        let paused = state.controls.paused.load(Ordering::SeqCst);
+        let pause_checked = if paused { MF_CHECKED } else { MF_UNCHECKED };
         let _ = AppendMenuW(menu, MF_STRING | MF_DISABLED, 0, w!("invisible-ptt"));
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
+        let _ = AppendMenuW(menu, MF_STRING | pause_checked, ID_PAUSE, w!("Pause"));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
         let _ = AppendMenuW(menu, MF_STRING, ID_SETTINGS, w!("Open settings file"));
         let _ = AppendMenuW(menu, MF_STRING, ID_LOG, w!("Open log file"));
@@ -392,6 +404,10 @@ mod imp {
             ID_LOG => open(&state.controls.log),
             ID_RELOAD => reload(&state.controls),
             ID_AUTOSTART => set_autostart(!autostart, &state.controls.config),
+            // Only ever flips the flag; giving the button back to Windows is a
+            // write to the mouse, and those belong to the input loop - which
+            // also has to wait until nothing is held before making one.
+            ID_PAUSE => state.controls.paused.store(!paused, Ordering::SeqCst),
             ID_EXIT => {
                 log!("exit requested from the tray");
                 state.controls.running.store(false, Ordering::SeqCst);
@@ -423,6 +439,7 @@ mod imp {
             Status::Waiting => "invisible-ptt - waiting for the mouse",
             Status::Ready => "invisible-ptt - ready",
             Status::Talking => "invisible-ptt - talking",
+            Status::Paused => "invisible-ptt - paused",
         };
         for (slot, ch) in nid.szTip.iter_mut().zip(tip.encode_utf16()) {
             *slot = ch;
@@ -436,6 +453,7 @@ mod imp {
             0 => Some(Status::Waiting),
             1 => Some(Status::Ready),
             2 => Some(Status::Talking),
+            3 => Some(Status::Paused),
             _ => None,
         }
     }

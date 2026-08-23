@@ -122,6 +122,21 @@ notification-area icon whose menu is the entire user interface (`src/tray.rs`).
   message box *on the tray thread*, where blocking is allowed - showing one
   from the input loop would freeze button handling until it was dismissed. A
   bad config changes nothing; the running one stays.
+- **Pause hands the mouse back rather than ignoring it.** The menu item ticks
+  like the autostart one, but where that writes a registry value, this only
+  flips an atomic (`Controls::paused`); the input loop owns the write, and
+  pausing runs the same `dev.restore()` Exit does - button re-enabled, spy
+  stopped, Onboard mode - so a paused daemon is indistinguishable from a
+  stopped one as far as the mouse is concerned. Resuming is `apply()`. While
+  paused the loop skips the poll, ignores the wake event, and ignores spy
+  events, and a Reload swaps the config *without* writing it (writing the
+  mapping is what un-pausing means); the resume applies it. The transition
+  obeys the held-button gate, same as reload. It is deliberately not
+  persisted: a daemon that came back paused after a reboot looks exactly like
+  one that failed to start. `paused_now` (what the mouse actually is) is
+  tracked separately from the atomic (what the menu says), because the two
+  differ while the gate is waiting, and every "do we still own this mouse"
+  decision has to ask the former.
 - **Reload obeys the held-button gate**, via `pending_reload`: it ends in the
   same `apply()` write as the periodic reassert, so it waits for no buttons
   down plus 500ms quiet. See the gotcha below.
@@ -190,8 +205,9 @@ notification-area icon whose menu is the entire user interface (`src/tray.rs`).
   `CARGO_CFG_TARGET_OS`/`_ENV` being `windows`/`msvc`, so the Linux build (and
   any `-gnu` target) silently gets no icon rather than a broken link.
 - **The icon shows status, and the input loop drives it by posting, not
-  calling.** Three of them (`tray::Status`: grey ring = no mouse, blue
-  ring+dot = ready, green disc = the button is down with a real action), all
+  calling.** Four of them (`tray::Status`: grey ring = no mouse, blue
+  ring+dot = ready, green disc = the button is down with a real action, amber
+  ring+pause glyph = paused), all
   drawn at startup and swapped with `NIM_MODIFY`. The loop calls
   `Tray::set_status` on *every* pass with a status recomputed from `connected`
   / `held` / `active` — recomputed centrally rather than at each of the dozen
@@ -203,6 +219,9 @@ notification-area icon whose menu is the entire user interface (`src/tray.rs`).
   starter config would otherwise claim to transmit on the very first press.
   `icon_data()` reads the current status rather than taking one, so NIM_ADD,
   NIM_MODIFY and the Explorer-restart re-add cannot disagree about what is up.
+  `Paused` outranks even "no mouse" in that recomputation, because nothing
+  polls for the mouse while paused, so `connected` is only as fresh as the
+  moment the daemon stood down.
 
 ## Gotchas
 
@@ -301,6 +320,7 @@ user but is not yet fully verified end-to-end (see the table below).
 | Read-gated reassert (poll writes only on divergence) | **Confirmed 2026-08-14** — a session covering a power-cycle toggle and a 5min idle-sleep produced zero `mouse forgot its configuration` lines, i.e. the poll read "as configured" every time and never wrote; startup's post-apply verification stayed silent; the wake path still recovers twice per wake and PTT still fires afterwards. The divergence branch itself (probe disagrees → `apply()`) has **not** been triggered on hardware: the wake event beat the poll to every reset in this run, which is the fallback working as intended but leaves that branch exercised only by unit tests |
 | Tray app starts, logs, and waits for an absent mouse | **Confirmed 2026-08-14** — run with the receiver unplugged and an inert config. No console window, no dialog; the log appears beside the config with local timestamps and a `---` session marker, `could not set up the mouse` is logged **once** and the process then sits waiting instead of exiting. Neither `tray: could not create its window` nor `tray: the shell refused the icon` appeared, so `CreateWindowExW` and `Shell_NotifyIconW(NIM_ADD)` both succeeded. `platform::error_box` was confirmed separately, by accident: an earlier build of the same run (before `connect_when_available`) blocked in `MessageBoxW` on the same failure |
 | Tray menu: opens, dispatches, autostart toggle, Exit | **Confirmed 2026-08-14** — by the user, and the log is the evidence: `will no longer start at sign-in` (so the Run key value had been written by an earlier click and was then deleted, i.e. both directions and the tick that follows the registry), then `exit requested from the tray` → `restoring mouse...`. The icon is findable and clickable |
+| Tray: Pause / Resume | **Confirmed 2026-08-23** — by the user, as "works fine": the item ticks, pausing hands the button back (it navigates again, as after Exit) and resuming takes it away again. So `dev.restore()` and `dev.apply()` both reach the mouse from the menu, and the held-button gate lets the transition through rather than swallowing it. The interactions around it — Reload while paused, a wake event while paused, resuming onto an absent mouse — share this code but were not independently triggered |
 | First run writes an inert config and logs where | **Confirmed 2026-08-14** — with `%APPDATA%\invisible-ptt` absent, a no-argument launch created the directory, wrote the starter, logged `first run: wrote a starter config to ...`, and connected to the mouse having disabled nothing: the applied mapping read `[01 02 03 04 05]` and the log said `button 3 still reaches Windows normally`. An earlier build that wrote the *example* instead was watched doing the opposite - it disabled the back button on a config with no Discord credentials, which is what the starter exists to prevent |
 | Open settings file / Open log file | **Fixed, not re-verified** — reported as "does nothing". It was not: Notepad opened the right file, *behind* everything, because nothing granted it the foreground. Now `AllowSetForegroundWindow` + `FindExecutableW` + a logged failure line. That fix has not been clicked yet |
 | Reload settings applies an edited config in place | **Confirmed 2026-08-14** — by the user, on hardware: edited config, Reload, new mapping in effect with no restart |

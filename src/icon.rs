@@ -21,9 +21,9 @@
 /// What the icon is currently saying. The daemon has no window, so this and
 /// the log are the only places its state is visible at all.
 ///
-/// Deliberately three, and deliberately distinguished by *shape* as well as
-/// colour: a 32x32 icon on a taskbar is small, and a colour-only difference is
-/// no difference to anyone who cannot see it.
+/// Deliberately distinguished by *shape* as well as colour: a 32x32 icon on a
+/// taskbar is small, and a colour-only difference is no difference to anyone
+/// who cannot see it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u8)]
 // Same as Controls: the Linux stub takes a Status and ignores it.
@@ -35,6 +35,12 @@ pub enum Status {
     Ready = 1,
     /// The button is down and its action is asserted.
     Talking = 2,
+    /// Paused from the menu: the mouse is in its normal state and the button
+    /// belongs to Windows again. Its own state rather than a shade of
+    /// `Waiting`, because nothing is wrong - the daemon was asked to stand
+    /// down, and an icon that said "ready" while the button navigated back
+    /// would be the one lie the tray must not tell.
+    Paused = 3,
 }
 
 /// The icon the *program* is, as opposed to the one the daemon happens to be
@@ -54,6 +60,7 @@ impl Status {
             Status::Waiting => (0x8a, 0x8a, 0x8a), // grey: nothing to talk to
             Status::Ready => (0x2e, 0x9b, 0xf0),   // blue: armed and waiting
             Status::Talking => (0x3d, 0xc2, 0x5f), // green: transmitting
+            Status::Paused => (0xe0, 0x99, 0x2b),  // amber: deliberately idle
         }
     }
 }
@@ -64,7 +71,7 @@ const SUPERSAMPLE: u32 = 4;
 
 /// Draw `status` at `size`x`size`: a hollow ring while there is no mouse, a
 /// dot inside that ring once it is armed, a filled disc while the button is
-/// down.
+/// down, and the two bars of a pause glyph inside the ring while paused.
 ///
 /// Rows run top-down, and each pixel is B, G, R, A - the byte order both
 /// `CreateIcon` and a 32bpp DIB read. Alpha is edge coverage, so the result is
@@ -90,10 +97,16 @@ pub fn bgra(size: u32, status: Status) -> Vec<u8> {
                     // Back into 32x32 units, where the radii are written.
                     let dist = (dx * dx + dy * dy).sqrt() / scale;
                     let ring = (11.0..=14.5).contains(&dist);
+                    // The pause glyph, in the same 32x32 units: two upright
+                    // bars, clear of the ring's inner edge at 11.
+                    let dx = dx / scale;
+                    let dy = dy / scale;
+                    let bars = (2.0..=5.0).contains(&dx.abs()) && dy.abs() <= 7.0;
                     let ink = match status {
                         Status::Waiting => ring,
                         Status::Ready => ring || dist <= 7.0,
                         Status::Talking => dist <= 14.5,
+                        Status::Paused => ring || bars,
                     };
                     hits += u32::from(ink);
                 }
@@ -115,7 +128,12 @@ pub fn bgra(size: u32, status: Status) -> Vec<u8> {
 mod tests {
     use super::*;
 
-    const ALL: [Status; 3] = [Status::Waiting, Status::Ready, Status::Talking];
+    const ALL: [Status; 4] = [
+        Status::Waiting,
+        Status::Ready,
+        Status::Talking,
+        Status::Paused,
+    ];
 
     fn alpha(bits: &[u8], size: u32, x: u32, y: u32) -> u8 {
         bits[((y * size + x) * 4 + 3) as usize]
@@ -141,18 +159,22 @@ mod tests {
         }
     }
 
-    /// The three are meant to differ by *shape*, not only by colour - a
+    /// The states are meant to differ by *shape*, not only by colour - a
     /// taskbar icon is small and colour is no help to everyone. The middle is
-    /// where they disagree: empty, a dot, and filled in.
+    /// where they disagree: empty, a dot, filled in, or two bars. Three probes
+    /// inside the ring tell all four apart.
     #[test]
-    fn the_three_states_differ_by_shape() {
+    fn the_states_differ_by_shape() {
         const N: u32 = 32;
-        // Centre, and a point in the gap between the dot and the ring.
+        // A point in the gap between the dot and the ring, and one on the
+        // left-hand bar of the pause glyph.
         let gap = (N / 2, N / 2 - 9);
-        for (status, centre, in_gap) in [
-            (Status::Waiting, false, false),
-            (Status::Ready, true, false),
-            (Status::Talking, true, true),
+        let bar = (N / 2 - 4, N / 2);
+        for (status, centre, in_gap, on_bar) in [
+            (Status::Waiting, false, false, false),
+            (Status::Ready, true, false, true),
+            (Status::Talking, true, true, true),
+            (Status::Paused, false, false, true),
         ] {
             let bits = bgra(N, status);
             assert_eq!(
@@ -161,6 +183,7 @@ mod tests {
                 "{status:?}: centre"
             );
             assert_eq!(alpha(&bits, N, gap.0, gap.1) > 0, in_gap, "{status:?}: gap");
+            assert_eq!(alpha(&bits, N, bar.0, bar.1) > 0, on_bar, "{status:?}: bar");
         }
     }
 

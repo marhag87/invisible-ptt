@@ -471,6 +471,9 @@ fn main() {
     };
 
     let running = Arc::new(AtomicBool::new(true));
+    // What the tray's Pause tick says. The loop owns what has actually been
+    // done to the mouse (`paused_now` below); this is only the request.
+    let paused = Arc::new(AtomicBool::new(false));
     // The tray parses a reloaded config and sends it here; this thread owns
     // everything that has to change as a result.
     let (reload_tx, reload_rx) = std::sync::mpsc::channel::<Config>();
@@ -483,6 +486,7 @@ fn main() {
     // to click Exit on.
     let tray = tray::spawn(tray::Controls {
         running: running.clone(),
+        paused: paused.clone(),
         reload: reload_tx,
         config: path.clone(),
         log: log_path,
@@ -508,6 +512,11 @@ fn main() {
     let mut bit: u16 = 1 << cfg.button;
     // A config from the tray, waiting for a safe moment to be applied.
     let mut pending_reload: Option<Config> = None;
+    // Whether the mouse has actually been handed back, as opposed to whether
+    // the menu says it should be. The two differ for as long as the write is
+    // waiting on the held-button gate below, and every "do we still own this
+    // mouse" decision in the loop asks this one, not the atomic.
+    let mut paused_now = false;
     let mut held = false;
     let mut active: Action = Action::None;
     let mut last_poll = Instant::now();
@@ -557,13 +566,52 @@ fn main() {
         // An action of `none` is deliberately not Talking: the button is down,
         // but nothing is being transmitted, and an icon that says otherwise on
         // the inert starter config would be a lie on the very first run.
-        tray.set_status(if !connected {
+        //
+        // Paused outranks the rest, including a missing mouse: while paused
+        // nothing polls for the mouse, so `connected` is only as fresh as the
+        // moment we stood down - and "paused" is the honest answer to what the
+        // daemon is doing either way.
+        tray.set_status(if paused_now {
+            tray::Status::Paused
+        } else if !connected {
             tray::Status::Waiting
         } else if held && active != Action::None {
             tray::Status::Talking
         } else {
             tray::Status::Ready
         });
+
+        // Pause and resume, from the tray. Pausing means handing the mouse
+        // back exactly as Exit would - the button navigates again, the spy
+        // stops - which is a write, so it waits for the same gate as every
+        // other write: nothing held, and quiet for 500ms. In practice that is
+        // the 500ms after the click that closed the menu.
+        if paused.load(Ordering::SeqCst) != paused_now
+            && button_state == 0
+            && last_button_event.elapsed() > Duration::from_millis(500)
+        {
+            paused_now = !paused_now;
+            if paused_now {
+                // The action in flight is ours to end: with the spy stopped,
+                // the release event for a button held right now is never coming.
+                release(&mut held, &mut active, &discord);
+                dev.restore(&cfg);
+                log!("paused - the mouse is Windows' again until you resume");
+            } else {
+                match dev.apply(&cfg) {
+                    Ok(()) => {
+                        log!("resumed");
+                        report_visibility(&cfg);
+                        // Nothing for the poll to find; give it a full interval.
+                        last_poll = Instant::now();
+                    }
+                    // The mouse is away. Leave last_poll alone - it has not
+                    // run since before the pause, so the poll below fires on
+                    // this very pass and reconnects.
+                    Err(e) => logerr!("resumed, but the mouse did not take it: {e}"),
+                }
+            }
+        }
 
         // Reload settings, from the tray. It arrives already parsed and
         // validated - a bad file never gets this far, and the running
@@ -597,16 +645,22 @@ fn main() {
                 // Whatever the old token's schedule was, it is not this one's.
                 next_refresh = Instant::now();
             }
-            // Writing the new mapping is also the only way to give back a
-            // button the old one had disabled.
-            match dev.apply(&cfg) {
-                Ok(()) => {
-                    log!("reloaded {}", path.display());
-                    report_visibility(&cfg);
+            if paused_now {
+                // Nothing goes to the mouse while paused - writing the new
+                // mapping is precisely what un-pausing means. Resume applies it.
+                log!("reloaded {} (still paused)", path.display());
+            } else {
+                // Writing the new mapping is also the only way to give back a
+                // button the old one had disabled.
+                match dev.apply(&cfg) {
+                    Ok(()) => {
+                        log!("reloaded {}", path.display());
+                        report_visibility(&cfg);
+                    }
+                    // The mouse is away; the reconnect below re-applies whatever
+                    // is current, which is now the config we just swapped in.
+                    Err(e) => logerr!("reloaded, but the mouse did not take it: {e}"),
                 }
-                // The mouse is away; the reconnect below re-applies whatever
-                // is current, which is now the config we just swapped in.
-                Err(e) => logerr!("reloaded, but the mouse did not take it: {e}"),
             }
         }
 
@@ -640,7 +694,11 @@ fn main() {
         // Deferring is safe: an active session keeps the mouse awake, so it
         // hasn't forgotten anything, and the wake event covers the cases where
         // it has.
-        if (check_now || last_poll.elapsed() > interval)
+        // Not while paused: the mouse is meant to be in its own state, and
+        // this is the one thing in the loop whose whole job is to put it back
+        // in ours.
+        if !paused_now
+            && (check_now || last_poll.elapsed() > interval)
             && button_state == 0
             && last_button_event.elapsed() > Duration::from_millis(500)
         {
@@ -713,6 +771,11 @@ fn main() {
         // dropped Host mode, the mapping, and the spy. Re-arm immediately
         // rather than waiting out the fallback poll.
         if Some(event[2]) == dev.wireless_idx {
+            // A mouse that wakes while we are paused has come back in the
+            // state we want it in - the factory one. Leave it there.
+            if paused_now {
+                continue;
+            }
             logerr!("wake event -> reasserting mouse state");
             // The wake line already announces recovery, so update state
             // silently to keep the poll from printing "mouse back" too. A hold
@@ -733,8 +796,10 @@ fn main() {
         }
 
         // Feature index must match the spy, and the high nibble of byte 3
-        // is the event index - 0 is MouseButtonEvent.
-        if event[2] != dev.spy_idx || (event[3] >> 4) != 0 {
+        // is the event index - 0 is MouseButtonEvent. Paused means the spy is
+        // stopped, so there should be nothing here to read; belt and braces,
+        // because acting on a button Windows can also see would fire twice.
+        if paused_now || event[2] != dev.spy_idx || (event[3] >> 4) != 0 {
             continue;
         }
 

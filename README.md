@@ -119,6 +119,7 @@ The icon says what the daemon is doing, by shape as much as by colour:
 | grey ring | waiting for the mouse — it has not turned up yet, or it went away |
 | blue ring with a dot | ready: the button is hijacked and being watched |
 | solid green circle | the button is down and its action is firing |
+| amber ring with a pause glyph | paused from the menu: the button is Windows' again and nothing is being watched |
 
 Hover for the same thing in words. A button configured with `none` stays blue
 while held, because nothing is being transmitted.
@@ -133,6 +134,7 @@ Right-click (or left-click) the icon:
 
 | | |
 |---|---|
+| **Pause** | ticked while paused. Hands the button back to Windows - it navigates again, exactly as if the daemon had exited - and stops watching it. Untick to take it back. Not remembered across restarts |
 | **Open settings file** | `config.toml`, in your usual editor |
 | **Open log file** | `invisible-ptt.log`, beside the config — everything the daemon has to say goes there, since there is no console to print to. Rotates at 1 MB |
 | **Reload settings** | applies an edited config without restarting: new mapping, new rules, new Discord credentials. A config with a mistake in it is rejected with a message box and nothing changes |
