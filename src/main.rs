@@ -149,7 +149,7 @@ struct Device {
 }
 
 impl Device {
-    fn connect(api: &hidapi::HidApi, cfg: &Config) -> hidpp::Result<Self> {
+    fn connect(api: &mut hidapi::HidApi, cfg: &Config) -> hidpp::Result<Self> {
         let mut pp = HidPp::open(api)?;
         let profiles_idx = pp.feature_index(FEAT_ONBOARD_PROFILES)?;
         let spy_idx = pp.feature_index(FEAT_MOUSE_BUTTON_SPY)?;
@@ -339,7 +339,7 @@ fn create_config(path: &Path) -> std::io::Result<()> {
 ///
 /// Returns None if Exit or Restart was chosen while waiting.
 fn connect_when_available(
-    api: &hidapi::HidApi,
+    api: &mut hidapi::HidApi,
     cfg: &Config,
     running: &AtomicBool,
 ) -> Option<Device> {
@@ -465,7 +465,8 @@ fn main() {
     let mut default_action = parse_action(&cfg.default_action);
     let mut rules = compile_rules(&cfg);
 
-    let api = match hidapi::HidApi::new() {
+    // Mutable because every connect re-enumerates: see `HidPp::open`.
+    let mut api = match hidapi::HidApi::new() {
         Ok(a) => a,
         Err(e) => fatal(&format!("hidapi init failed: {e}")),
     };
@@ -498,7 +499,7 @@ fn main() {
     // the user the wait is the mouse's and not the daemon's.
     tray.set_status(tray::Status::Waiting);
 
-    let mut dev = match connect_when_available(&api, &cfg, &running) {
+    let mut dev = match connect_when_available(&mut api, &cfg, &running) {
         Some(dev) => dev,
         None => {
             // Exit chosen before the mouse ever turned up. Nothing to restore:
@@ -730,7 +731,7 @@ fn main() {
                 // reconnect, which also covers a receiver replug (dead handle,
                 // no wake event). Log only when reachability actually flips.
                 let ok = dev.apply(&cfg).is_ok()
-                    || match Device::connect(&api, &cfg) {
+                    || match Device::connect(&mut api, &cfg) {
                         Ok(d) => {
                             dev = d;
                             true

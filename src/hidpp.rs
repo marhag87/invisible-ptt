@@ -92,7 +92,21 @@ impl HidPp {
     /// the mouse collection. That distinction is what makes this reachable on
     /// Windows at all - Windows will not hand out the mouse collection, but a
     /// vendor collection is fair game.
-    pub fn open(api: &HidApi) -> Result<Self> {
+    ///
+    /// Re-enumerates on every call. `HidApi` snapshots the device list once,
+    /// when it is created, and `device_list()` only ever returns that snapshot,
+    /// so without this a mouse that turns up later is invisible for the life of
+    /// the process. That is exactly what plugging in the charging cable does:
+    /// the mouse leaves the receiver and appears as a USB device of its own
+    /// (`046d:C094`, with its own HID++ collection), and the daemon went on
+    /// asking the receiver for a mouse that was no longer behind it. Logitech
+    /// only, since nothing else is a candidate - the poll calls this every 30s
+    /// while the mouse is away, and there is no reason for that to walk every
+    /// HID device on the machine.
+    pub fn open(api: &mut HidApi) -> Result<Self> {
+        api.reset_devices()?;
+        api.add_devices(0x046D, 0)?;
+
         let mut ifaces: Vec<(&str, u16)> = Vec::new();
 
         for info in api.device_list() {
@@ -106,20 +120,7 @@ impl HidPp {
             ifaces.push((path, info.usage()));
         }
 
-        // A Logitech receiver exposes two vendor collections: usage 0x01 for
-        // short reports (0x10) and 0x02 for long reports (0x11). We speak long
-        // reports exclusively, so try the long collection first - writing 20
-        // bytes to the short one just fails.
-        ifaces.sort_by_key(|(_, usage)| if *usage == 0x02 { 0 } else { 1 });
-
-        let mut candidates: Vec<(&str, u8)> = Vec::new();
-        for (path, _) in ifaces {
-            // 0x01 = first paired device behind a receiver; 0xFF = wired/direct.
-            candidates.push((path, 0x01));
-            candidates.push((path, 0xFF));
-        }
-
-        for (path, idx) in candidates {
+        for (path, idx) in candidates(ifaces) {
             let cpath = std::ffi::CString::new(path).unwrap();
             let Ok(dev) = api.open_path(&cpath) else {
                 continue;
@@ -129,8 +130,13 @@ impl HidPp {
                 dev_index: idx,
                 pending: VecDeque::new(),
             };
-            // ROOT/GetProtocolVersion - cheapest liveness check there is.
-            if probe.call(0x00, 1, &[]).is_ok() {
+            // Ask for the spy rather than just pinging: one ROOT round-trip
+            // either way, but this one also proves it is a device we can
+            // drive. A ping alone would accept any Logitech HID++ 2.0 device
+            // on a cable - a keyboard, a headset - and with 0xFF now tried
+            // first, that device would win over the mouse, connect() would fail
+            // on the missing feature, and the mouse would never be reached.
+            if probe.feature_index(FEAT_MOUSE_BUTTON_SPY).is_ok() {
                 return Ok(probe);
             }
         }
@@ -227,6 +233,30 @@ impl HidPp {
     }
 }
 
+/// The (interface, device index) pairs `open()` tries, in the order it tries
+/// them.
+///
+/// Long collections first: a Logitech device exposes two vendor collections,
+/// usage 0x01 for short reports (0x10) and 0x02 for long ones (0x11), and we
+/// speak long reports exclusively - writing 20 bytes to the short one just
+/// fails. That holds for the receiver and the corded mouse alike.
+///
+/// Then every interface at 0xFF (direct) before any at 0x01 (first device
+/// behind a receiver). A mouse on its cable answers at *both* - confirmed
+/// 2026-11-09, the Superlight over USB echoed a ROOT call at 0x01 as readily
+/// as at 0xFF - but a directly connected device addresses its own
+/// notifications as 0xFF, and `is_notification` filters on the index we bound.
+/// Bound at 0x01, a corded mouse would answer every command and never be heard
+/// pressing a button. The receiver does not answer a HID++ 2.0 call at 0xFF at
+/// all (also confirmed that day), so asking it there first costs one timeout
+/// and nothing else.
+fn candidates(mut ifaces: Vec<(&str, u16)>) -> Vec<(&str, u8)> {
+    ifaces.sort_by_key(|(_, usage)| if *usage == 0x02 { 0 } else { 1 });
+    let direct = ifaces.iter().map(|(path, _)| (*path, 0xFF));
+    let paired = ifaces.iter().map(|(path, _)| (*path, 0x01));
+    direct.chain(paired).collect()
+}
+
 /// Recognise a HID++ 2.0 error page and pull the error code out of it.
 ///
 /// The device answers a failed command with a short report carrying feature
@@ -279,6 +309,31 @@ mod tests {
         assert_eq!(error_code(&buf, 0x01, 0x07, (4 << 4) | SW_ID), None);
         // Another device behind the same receiver.
         assert_eq!(error_code(&buf, 0x02, 0x08, (4 << 4) | SW_ID), None);
+    }
+
+    #[test]
+    fn candidates_try_long_collections_and_direct_devices_first() {
+        // As enumerated on 2026-11-09 with the mouse on its cable: the receiver
+        // first, short collection before long, then the mouse itself.
+        let ifaces = vec![
+            ("rx-short", 0x01),
+            ("rx-long", 0x02),
+            ("mouse-short", 0x01),
+            ("mouse-long", 0x02),
+        ];
+        assert_eq!(
+            candidates(ifaces),
+            vec![
+                ("rx-long", 0xFF),
+                ("mouse-long", 0xFF),
+                ("rx-short", 0xFF),
+                ("mouse-short", 0xFF),
+                ("rx-long", 0x01),
+                ("mouse-long", 0x01),
+                ("rx-short", 0x01),
+                ("mouse-short", 0x01),
+            ]
+        );
     }
 
     #[test]

@@ -50,6 +50,23 @@ Confirmed on a G PRO X Superlight over its Lightspeed receiver (Fedora 44 live,
 Device IDs: receiver `046d:C547`, mouse WPID `4093` (wireless) / usbid `C094`
 (wired). Device index `0x01` behind the receiver, `0xFF` wired.
 
+**On its charging cable the mouse is a different HID device** (confirmed
+2026-11-09, read-only probe): it leaves the receiver, which then answers
+nothing at either index, and appears as `046d:C094` with its own long vendor
+collection carrying the same feature indices (7, 8, wake 4). Three things
+follow, and the daemon got all three wrong until that day:
+
+- **`HidApi` snapshots the device list at creation.** A connect that does not
+  re-enumerate can never find the corded mouse, so `HidPp::open` resets and
+  re-adds Logitech devices every time.
+- **Corded, it answers at `0x01` as well as `0xFF`**, so `open()` must try
+  `0xFF` first. Bound at `0x01` it would answer every command while its
+  notifications, addressed `0xFF`, were filtered out as someone else's.
+- **It keeps Host mode and the mapping across the switch.** Read straight
+  after plugging in, with no daemon on it: `mode=02, mapping=[01 02 03 00 05]`.
+  So a daemon that loses the mouse to the cable leaves the button *dead*, not
+  navigating - and its Exit restores the receiver, not the mouse.
+
 ## Protocol notes
 
 Long report only (20 bytes):
@@ -311,6 +328,7 @@ user but is not yet fully verified end-to-end (see the table below).
 | HID++ reachable through Windows' HID stack | **Confirmed 2026-08-13** — vendor collection opened, ROOT probe answered, spy notifications arrive |
 | DPI survives Host mode | **Confirmed 2026-08-13** — 800 DPI before and after. NB: this Superlight has no DPI-shift button, so onboard DPI *switching* is untested (and moot here); only the DPI *value* is verified to survive |
 | Recovery after mouse sleep/power-cycle | **Confirmed 2026-08-13** — mouse forgets mapping *and* spy; daemon reasserts both within ≤5s and F13 returns. Required fixing `apply()` to re-arm the spy, not just the mapping (see its doc comment) |
+| Following the mouse onto its charging cable | **Confirmed 2026-11-09** — by the user, as "it works": started with the mouse already corded, the daemon bound it over USB and PTT fires from the disabled button, which also confirms the corded spy events are addressed `0xFF` (they pass `is_notification` with the device bound there). Not yet seen: the hand-over itself while running (plugging in with the daemon on the receiver, which the 30s poll has to notice, since nothing broadcasts it), and the way back to the receiver after unplugging |
 | Wake-driven reassert via `0x1D4B` WirelessDeviceStatus | **Confirmed 2026-08-13** — feature present over the Lightspeed receiver on Windows; broadcasts on wake from **both** a power-cycle and a ~6min idle-sleep, and recovery (mapping + F13) is instant. Fires ~twice per wake; `apply()` is idempotent so the second is a harmless no-op. Reachability logging is edge-triggered (`lost the mouse; waiting for it to come back...` once on the falling edge), so a long sleep no longer spams the log |
 | Per-app `key:` rule + foreground detection | **Confirmed 2026-08-13** — `chrome.exe`→`key:V` sends V only while Chrome is focused, F13 default elsewhere. Confirms `platform::foreground_process()` returns the real exe name on Windows (was previously only known not to crash) and the case-insensitive exact-match rule logic |
 | Discord `rpc` action (mute-toggle PTT over local pipe) | **Confirmed 2026-08-13** — user runs `default_action = "rpc"`; mute-toggle PTT works over the local IPC pipe |
