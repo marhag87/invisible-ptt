@@ -26,6 +26,9 @@ pub const FEAT_MOUSE_BUTTON_SPY: u16 = 0x8110;
 /// Broadcasts an event when a wireless device reconnects and its volatile
 /// state needs re-applying. Optional - not every firmware exposes it.
 pub const FEAT_WIRELESS_DEVICE_STATUS: u16 = 0x1D4B;
+/// UNIFIED BATTERY: charge level and charging state. Optional - older mice
+/// report battery through 0x1000/0x1001 instead, which this does not read.
+pub const FEAT_UNIFIED_BATTERY: u16 = 0x1004;
 
 pub const MODE_ONBOARD: u8 = 0x01;
 pub const MODE_HOST: u8 = 0x02;
@@ -47,6 +50,65 @@ pub const FN_STOP_SPY: u8 = 2;
 pub const FN_GET_MAPPING: u8 = 3;
 /// 0x8110 fn4 SetMouseButtonMapping - one byte per physical button.
 pub const FN_SET_MAPPING: u8 = 4;
+/// 0x1004 fn0 GetCapabilities - [0] supported level bits, [1] flags. Flag bit
+/// 1 (`BATTERY_SOC`) says GetStatus carries a real percentage; without it
+/// only the coarse level bits mean anything. Numbers per the Linux kernel's
+/// hid-logitech-hidpp.c, since cvuchener/hidpp does not cover 0x1004.
+pub const FN_BATTERY_CAPABILITIES: u8 = 0;
+pub const BATTERY_SOC: u8 = 0x02;
+/// 0x1004 fn1 GetStatus - see `Battery::from_status`. The feature's event 0
+/// carries the same four bytes, unasked, whenever they change.
+pub const FN_BATTERY_STATUS: u8 = 1;
+
+/// Whether the mouse is charging, from 0x1004's charging-status byte.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Charging {
+    No,
+    Yes,
+    /// On the cable and full.
+    Full,
+    Error,
+}
+
+/// What 0x1004 GetStatus (or its event) says about the battery.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Battery {
+    pub percent: u8,
+    pub charging: Charging,
+}
+
+impl Battery {
+    /// Decode `[percent, level bits, charging status, external power]`.
+    ///
+    /// Charging status 1 is charging and 2 is charging slowly, which nobody
+    /// hovering over an icon needs told apart; 3 is complete and 4 an error.
+    /// Anything else is undefined, and is shown as plain not-charging rather
+    /// than as an error the mouse never reported.
+    pub fn from_status(params: &[u8]) -> Self {
+        let charging = match params[2] {
+            1 | 2 => Charging::Yes,
+            3 => Charging::Full,
+            4 => Charging::Error,
+            _ => Charging::No,
+        };
+        Battery {
+            percent: params[0].min(100),
+            charging,
+        }
+    }
+}
+
+impl std::fmt::Display for Battery {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}%", self.percent)?;
+        match self.charging {
+            Charging::No => Ok(()),
+            Charging::Yes => write!(f, ", charging"),
+            Charging::Full => write!(f, ", charged"),
+            Charging::Error => write!(f, ", charging error"),
+        }
+    }
+}
 
 #[derive(Debug)]
 pub enum Error {
@@ -334,6 +396,34 @@ mod tests {
                 ("mouse-short", 0x01),
             ]
         );
+    }
+
+    #[test]
+    fn battery_decodes_what_the_superlight_reports() {
+        // Read on 2026-11-09 over the receiver, just off the cable: 76%,
+        // level bits "full", discharging, no external power.
+        let b = Battery::from_status(&[0x4C, 0x08, 0x00, 0x00]);
+        assert_eq!(
+            b,
+            Battery {
+                percent: 76,
+                charging: Charging::No
+            }
+        );
+        assert_eq!(b.to_string(), "76%");
+    }
+
+    #[test]
+    fn battery_names_each_charging_state() {
+        let show = |status| Battery::from_status(&[50, 0x04, status, 0x01]).to_string();
+        assert_eq!(show(1), "50%, charging");
+        assert_eq!(show(2), "50%, charging");
+        assert_eq!(show(3), "50%, charged");
+        assert_eq!(show(4), "50%, charging error");
+        // Undefined: not an error the mouse ever claimed.
+        assert_eq!(show(9), "50%");
+        // A percentage over 100 is a firmware bug, not a reading.
+        assert_eq!(Battery::from_status(&[0xFF, 0, 0, 0]).percent, 100);
     }
 
     #[test]

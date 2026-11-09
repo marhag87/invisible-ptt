@@ -146,6 +146,13 @@ struct Device {
     /// Feature index of WirelessDeviceStatus (0x1D4B), if the firmware has it.
     /// Its notification means "reconnected, reconfigure me".
     wireless_idx: Option<u8>,
+    /// Feature index of UNIFIED BATTERY (0x1004), if the firmware has it *and*
+    /// reports a percentage. Coarse levels alone are not worth a tooltip.
+    battery_idx: Option<u8>,
+    /// The last reading, for the tray's tooltip. Kept across a failed read:
+    /// an unreachable mouse is the poll's business, and the tooltip hides the
+    /// battery whenever the loop says it is not connected.
+    battery: Option<Battery>,
 }
 
 impl Device {
@@ -160,8 +167,17 @@ impl Device {
             Some(i) => format!("index {i}"),
             None => "unsupported (polling only)".to_string(),
         };
+        // Optional too, and only kept if it can give a percentage.
+        let battery_idx = pp.feature_index(FEAT_UNIFIED_BATTERY).ok().filter(|&idx| {
+            pp.call(idx, FN_BATTERY_CAPABILITIES, &[])
+                .is_ok_and(|caps| caps[1] & BATTERY_SOC != 0)
+        });
+        let battery = match battery_idx {
+            Some(i) => format!("index {i}"),
+            None => "unsupported".to_string(),
+        };
         log!(
-            "onboard profiles = index {profiles_idx}, button spy = index {spy_idx}, wake events = {wake}"
+            "onboard profiles = index {profiles_idx}, button spy = index {spy_idx}, wake events = {wake}, battery = {battery}"
         );
 
         let mut dev = Device {
@@ -169,6 +185,8 @@ impl Device {
             spy_idx,
             profiles_idx,
             wireless_idx,
+            battery_idx,
+            battery: None,
         };
         // What the mouse looked like before we touched it, for the log.
         match dev.probe(cfg) {
@@ -187,7 +205,23 @@ impl Device {
             Ok(p) => logerr!("warning: the mouse did not take it: {}", p.describe()),
             Err(e) => logerr!("warning: could not confirm the mouse state: {e}"),
         }
+        dev.read_battery();
+        if let Some(b) = dev.battery {
+            log!("battery {b}");
+        }
         Ok(dev)
+    }
+
+    /// Refresh `battery`. One read with no side effects, so it can ride along
+    /// with the poll, behind the same held-button gate as the probe. A failure
+    /// keeps the last reading; see the field.
+    fn read_battery(&mut self) {
+        let Some(idx) = self.battery_idx else {
+            return;
+        };
+        if let Ok(r) = self.pp.call(idx, FN_BATTERY_STATUS, &[]) {
+            self.battery = Some(Battery::from_status(&r));
+        }
     }
 
     /// Assert the full desired state: Host mode, button mapping, and the spy.
@@ -504,7 +538,7 @@ fn main() {
     // place it stays for any length of time: at sign-in the receiver has
     // routinely not enumerated yet, and a grey icon is the only thing telling
     // the user the wait is the mouse's and not the daemon's.
-    tray.set_status(tray::Status::Waiting);
+    tray.set_status(tray::Status::Waiting, None);
 
     let mut dev = match connect_when_available(&mut api, &cfg, &running) {
         Some(dev) => dev,
@@ -579,7 +613,10 @@ fn main() {
         // nothing polls for the mouse, so `connected` is only as fresh as the
         // moment we stood down - and "paused" is the honest answer to what the
         // daemon is doing either way.
-        tray.set_status(if paused_now {
+        //
+        // The battery rides along for the tooltip, and only while connected:
+        // the last reading from a mouse that has gone is not a reading.
+        let status = if paused_now {
             tray::Status::Paused
         } else if !connected {
             tray::Status::Waiting
@@ -587,7 +624,8 @@ fn main() {
             tray::Status::Talking
         } else {
             tray::Status::Ready
-        });
+        };
+        tray.set_status(status, if connected { dev.battery } else { None });
 
         // Pause and resume, from the tray. Pausing means handing the mouse
         // back exactly as Exit would - the button navigates again, the spy
@@ -752,6 +790,11 @@ fn main() {
                 }
                 connected = ok;
             }
+            // The battery event should keep the tooltip current by itself;
+            // this is the backstop, at the poll's pace and behind its gate.
+            if connected {
+                dev.read_battery();
+            }
         }
 
         let event = match dev.pp.next_event(100) {
@@ -799,7 +842,21 @@ fn main() {
             // avoids. The duplicate broadcast makes this run twice; apply() is
             // idempotent.
             connected = dev.apply(&cfg).is_ok();
+            // It may have slept for hours, and the poll just got pushed back.
+            if connected {
+                dev.read_battery();
+            }
             last_poll = Instant::now();
+            continue;
+        }
+
+        // UNIFIED BATTERY event 0: the charge or the charging state changed,
+        // in the same four bytes GetStatus returns. Taken even while paused -
+        // it is a notification, not a write, and the tooltip still shows it.
+        if Some(event[2]) == dev.battery_idx {
+            if (event[3] >> 4) == 0 {
+                dev.battery = Some(Battery::from_status(&event[4..8]));
+            }
             continue;
         }
 

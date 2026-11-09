@@ -247,6 +247,17 @@ notification-area icon whose menu is the entire user interface (`src/tray.rs`).
   `Paused` outranks even "no mouse" in that recomputation, because nothing
   polls for the mouse while paused, so `connected` is only as fresh as the
   moment the daemon stood down.
+- **The tooltip carries the battery**, from `0x1004` UNIFIED BATTERY:
+  `invisible-ptt - ready - battery 76%, charging`. It travels in the same
+  posted `WM_TRAY_STATUS` as the status (packed into lparam), for the same
+  reason - the tray thread never asks the mouse anything. The loop reads it at
+  connect, on every poll and after a wake, and takes the feature's own event
+  in between; it is shown only while `connected`. Resolved at runtime like
+  every other index, and dropped unless GetCapabilities sets the
+  state-of-charge flag, since coarse levels alone are not worth a tooltip.
+  On this mouse: index 6, version 3, capabilities `[0f 07]`, and GetStatus
+  read `[4c 08 00 00]` = 76%, discharging, no external power (2026-11-09,
+  over the receiver, read-only).
 
 ## Gotchas
 
@@ -354,6 +365,7 @@ user but is not yet fully verified end-to-end (see the table below).
 | Uninstaller stops a running daemon | **Confirmed 2026-08-14** — uninstalled with the daemon running and a button disabled; it closed and the button navigated again afterwards. This is also the only confirmation of the `WM_CLOSE` handling, since `InitializeUninstall` posting `WM_CLOSE` to the tray window is what exercises it: the button coming back proves the message reached the input loop and not just the tray thread. The first attempt did nothing, because `CloseApplications` is a **Setup** directive that the uninstaller never consults — enabling it is precisely what argued the uninstall-side check away. `WM_QUERYENDSESSION` shares the handler but was not independently triggered, so sign-out restore is inferred, not seen |
 | Tray: the icon's appearance | **Confirmed 2026-08-14** — implied by the row below: a `CreateIcon` that had fallen back to the generic app icon would show the *same* image in all three states, so an icon that visibly changes is an icon that was drawn. The 32bpp DDB and the assumed row order are therefore both fine. `make_icon` has since been rewritten to take its pixels from `icon::bgra` rather than compute them inline; same centre, same radii, and the 128 threshold reproduces what the old point-sampled loop drew, so this should still hold — but nobody has looked at the icon since |
 | Exe carries an app icon (Start menu, Explorer, Add/remove) | **Confirmed 2026-08-14, on the built exe** — `PrivateExtractIcons` returns a native bitmap at 16, 32, 48 *and* 256 (so the large image is really there, not upscaled), centre pixel exactly `#2E9BF0` — the `Ready` blue — and transparent corners, which the generic placeholder is not. Resource enumeration shows `RT_ICON` 1..8 and a single `RT_GROUP_ICON` id 1, and 17 distinct alpha levels at 256px, i.e. the 4x4 supersampling arrived intact. So the hand-written `.res` is one link.exe accepts and one the shell reads. Then **confirmed by eye 2026-08-14**, from an installer built off the branch: Start menu search shows the blue ring and dot in both the result row and the large preview, cleanly antialiased at both sizes. Note Windows caches shell icons, so an install over a previous version may keep showing the old blank one until the cache turns over |
+| Tray: battery in the tooltip | **Confirmed 2026-11-09** — by the user, hovering over the icon: the battery shows. So `0x1004` resolves and passes the state-of-charge check at connect, and the packed lparam reaches the tray thread intact. Not yet watched: the battery *event* arriving (as opposed to the poll's read), and the charging/charged wording, which needs the cable |
 | Tray: the icon changes with status | **Confirmed 2026-08-14** — by the user, as "working as intended", so `NIM_MODIFY` from the posted `WM_TRAY_STATUS` reaches the shell. Which of the three states were watched individually is not recorded; grey needs an absent mouse and green needs a held button with a real action |
 | Reassert does not interrupt held buttons | **Confirmed 2026-08-13** — the periodic `apply()` was glitching a held left button into a brief release (interrupted hold-to-fire, daemon-only). Fixed by gating the reassert on no-button-held + 500ms quiet; verified with a 2s-interval build holding left through ~10 reasserts with zero interruptions. Also confirms the spy reports the passthrough left button |
 

@@ -45,13 +45,70 @@ pub struct Controls {
 #[allow(unused_imports)]
 pub use imp::{spawn, Tray};
 
+use crate::hidpp::{Battery, Charging};
+
+/// The hover text: the status in words, for an icon that is 16 pixels across
+/// by the time the shell has scaled it, and the battery when there is one to
+/// show - the only place it is shown at all, since Windows has no idea a
+/// mouse behind a Lightspeed receiver even has a battery.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn tooltip(status: Status, battery: Option<Battery>) -> String {
+    let status = match status {
+        Status::Waiting => "waiting for the mouse",
+        Status::Ready => "ready",
+        Status::Talking => "talking",
+        Status::Paused => "paused",
+    };
+    match battery {
+        Some(b) => format!("invisible-ptt - {status} - battery {b}"),
+        None => format!("invisible-ptt - {status}"),
+    }
+}
+
+/// A battery reading as 16 bits, so it fits in the posted message's lparam
+/// and in the atomic that decides whether to post at all. 0 is "no reading";
+/// anything else has bit 15 set, the charging state in bits 8-9 and the
+/// percentage in the low byte.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn pack(battery: Option<Battery>) -> u16 {
+    let Some(b) = battery else {
+        return 0;
+    };
+    let charging = match b.charging {
+        Charging::No => 0,
+        Charging::Yes => 1,
+        Charging::Full => 2,
+        Charging::Error => 3,
+    };
+    0x8000 | (charging << 8) | u16::from(b.percent)
+}
+
+/// `pack` undone. Total: every u16 decodes to something, since a stray
+/// message in our private range should cost a wrong tooltip at worst.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn unpack(bits: u16) -> Option<Battery> {
+    if bits & 0x8000 == 0 {
+        return None;
+    }
+    let charging = match (bits >> 8) & 0x03 {
+        0 => Charging::No,
+        1 => Charging::Yes,
+        2 => Charging::Full,
+        _ => Charging::Error,
+    };
+    Some(Battery {
+        percent: (bits as u8).min(100),
+        charging,
+    })
+}
+
 #[cfg(windows)]
 mod imp {
-    use super::{Controls, Status};
+    use super::{pack, tooltip, unpack, Battery, Controls, Status};
     use std::cell::Cell;
     use std::os::windows::ffi::OsStrExt;
     use std::path::Path;
-    use std::sync::atomic::{AtomicU8, Ordering};
+    use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::mpsc;
     use std::sync::OnceLock;
     use windows::core::{w, PCWSTR};
@@ -80,9 +137,10 @@ mod imp {
     /// until the restore is actually done.
     const WM_TRAY_QUIT: u32 = WM_APP + 2;
 
-    /// Change the icon. Posted by `Tray::set_status` from the input loop, in
-    /// wparam, because `Shell_NotifyIconW` belongs to the thread that owns the
-    /// window and the input loop must not wait on anything the tray is doing.
+    /// Change the icon and tooltip. Posted by `Tray::set_status` from the input
+    /// loop - the status in wparam, the packed battery in lparam - because
+    /// `Shell_NotifyIconW` belongs to the thread that owns the window and the
+    /// input loop must not wait on anything the tray is doing.
     const WM_TRAY_STATUS: u32 = WM_APP + 3;
 
     // Menu command ids. 0 is reserved: TrackPopupMenu returns it for "the user
@@ -107,6 +165,8 @@ mod imp {
         /// Which one is showing. A Cell rather than an atomic because only the
         /// tray thread ever touches it - the input loop posts a message.
         status: Cell<Status>,
+        /// For the tooltip; arrives in the same message as the status.
+        battery: Cell<Option<Battery>>,
     }
 
     impl State {
@@ -121,8 +181,9 @@ mod imp {
         /// runs without a menu rather than not running at all.
         hwnd: isize,
         /// What we last asked for, so `set_status` can be called from the loop
-        /// unconditionally and still post nothing in the usual case.
-        shown: AtomicU8,
+        /// unconditionally and still post nothing in the usual case: the
+        /// status in the low byte, the packed battery above it.
+        shown: AtomicU32,
         thread: Option<std::thread::JoinHandle<()>>,
     }
 
@@ -135,23 +196,25 @@ mod imp {
         let hwnd = started.recv().unwrap_or(0);
         Tray {
             hwnd,
-            shown: AtomicU8::new(Status::Waiting as u8),
+            shown: AtomicU32::new(Status::Waiting as u32),
             thread: Some(thread),
         }
     }
 
     impl Tray {
-        /// Show a different icon, if it is not the one already up.
+        /// Show a different icon or tooltip, if it is not the one already up.
         ///
         /// Called from the input loop on every pass, so the common case must
         /// cost nothing: one atomic swap, and a posted message only when the
-        /// status has actually changed. Posting rather than calling because
-        /// the shell wants `Shell_NotifyIconW` from the window's own thread,
-        /// and because a post never blocks - the tray could be sitting inside
-        /// `TrackPopupMenu` with a menu open, and a button press must not wait
-        /// for the user to close it.
-        pub fn set_status(&self, status: Status) {
-            if self.hwnd == 0 || self.shown.swap(status as u8, Ordering::Relaxed) == status as u8 {
+        /// status or the battery has actually changed. Posting rather than
+        /// calling because the shell wants `Shell_NotifyIconW` from the
+        /// window's own thread, and because a post never blocks - the tray
+        /// could be sitting inside `TrackPopupMenu` with a menu open, and a
+        /// button press must not wait for the user to close it.
+        pub fn set_status(&self, status: Status, battery: Option<Battery>) {
+            let battery = pack(battery);
+            let wanted = status as u32 | u32::from(battery) << 8;
+            if self.hwnd == 0 || self.shown.swap(wanted, Ordering::Relaxed) == wanted {
                 return;
             }
             unsafe {
@@ -159,7 +222,7 @@ mod imp {
                     HWND(self.hwnd as *mut std::ffi::c_void),
                     WM_TRAY_STATUS,
                     WPARAM(status as usize),
-                    LPARAM(0),
+                    LPARAM(battery as isize),
                 );
             }
         }
@@ -211,6 +274,7 @@ mod imp {
                 make_icon(instance, Status::Paused),
             ],
             status: Cell::new(Status::Waiting),
+            battery: Cell::new(None),
         }));
         // A message-only window (HWND_MESSAGE) would be tidier, but the tray
         // needs a window that can be brought to the foreground for the menu.
@@ -321,9 +385,11 @@ mod imp {
             }
             // The input loop's status changed. wparam is the new Status; a
             // value from anywhere else is not one, so check before indexing.
+            // lparam is the battery, which cannot be invalid - see unpack.
             WM_TRAY_STATUS => {
                 if let (Some(state), Some(status)) = (state(hwnd), status_from(wparam)) {
                     state.status.set(status);
+                    state.battery.set(unpack(lparam.0 as u16));
                     let _ = Shell_NotifyIconW(NIM_MODIFY, &icon_data(hwnd, state));
                 }
                 LRESULT(0)
@@ -433,15 +499,11 @@ mod imp {
             hIcon: state.icon(),
             ..Default::default()
         };
-        // The tooltip carries the same three states in words, for the icon
-        // that is 16 pixels across by the time the shell has scaled it.
-        let tip = match state.status.get() {
-            Status::Waiting => "invisible-ptt - waiting for the mouse",
-            Status::Ready => "invisible-ptt - ready",
-            Status::Talking => "invisible-ptt - talking",
-            Status::Paused => "invisible-ptt - paused",
-        };
-        for (slot, ch) in nid.szTip.iter_mut().zip(tip.encode_utf16()) {
+        let tip = tooltip(state.status.get(), state.battery.get());
+        // One slot short of the buffer, so the NUL the shell reads up to is
+        // always there; the longest tip is well under 128 anyway.
+        let room = nid.szTip.len() - 1;
+        for (slot, ch) in nid.szTip.iter_mut().take(room).zip(tip.encode_utf16()) {
             *slot = ch;
         }
         nid
@@ -659,7 +721,7 @@ mod imp {
 
 #[cfg(not(windows))]
 mod imp {
-    use super::{Controls, Status};
+    use super::{Battery, Controls, Status};
 
     /// There is no tray on the Linux side; the daemon runs headless there, as
     /// it always has. See platform.rs for the same arrangement.
@@ -671,7 +733,47 @@ mod imp {
 
     impl Tray {
         /// Nowhere to show it. The status is on stdout there anyway.
-        pub fn set_status(&self, _status: Status) {}
+        pub fn set_status(&self, _status: Status, _battery: Option<Battery>) {}
         pub fn shutdown(self) {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tooltip_adds_the_battery_only_when_there_is_one() {
+        let b = Battery {
+            percent: 76,
+            charging: Charging::Yes,
+        };
+        assert_eq!(
+            tooltip(Status::Ready, Some(b)),
+            "invisible-ptt - ready - battery 76%, charging"
+        );
+        assert_eq!(
+            tooltip(Status::Waiting, None),
+            "invisible-ptt - waiting for the mouse"
+        );
+    }
+
+    #[test]
+    fn battery_survives_the_trip_through_lparam() {
+        assert_eq!(unpack(pack(None)), None);
+        for charging in [Charging::No, Charging::Yes, Charging::Full, Charging::Error] {
+            for percent in [0, 1, 76, 100] {
+                let b = Some(Battery { percent, charging });
+                assert_eq!(unpack(pack(b)), b);
+            }
+        }
+        // 0% must not collide with "no reading".
+        assert_ne!(
+            pack(Some(Battery {
+                percent: 0,
+                charging: Charging::No
+            })),
+            0
+        );
     }
 }
