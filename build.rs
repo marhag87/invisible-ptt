@@ -52,6 +52,9 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=src/icon.rs");
 
+    // Before the target check below: the Linux build logs too.
+    stamp_version();
+
     // Both of these describe the *target*, not the machine we are running on:
     // resources are a PE thing, and a `.res` is only understood by link.exe.
     // The Linux build (smoke tests, and CI builds it so it cannot rot) and any
@@ -69,6 +72,75 @@ fn main() {
     // -bins, not the blanket form: the icon belongs on the daemon, and there
     // is no reason for every test harness to carry a copy of it.
     println!("cargo:rustc-link-arg-bins={}", res.display());
+}
+
+/// Hand the daemon its own version as `PTT_VERSION`, for the line that opens
+/// every log session.
+///
+/// A release - HEAD exactly on the tag `v<Cargo.toml version>` with nothing
+/// uncommitted - is just that version, `0.3.1`. Anything else is whatever
+/// `git describe` says, `v0.3.1-2-g8ab6525-dirty` say: two commits past 0.3.1,
+/// edited on top. That distinction is the point. Cargo.toml only moves at
+/// release time, so on its own it would put the same `0.3.1` on every build
+/// between two releases, and the log could not tell the installed copy from a
+/// dev build run out of `target\release`.
+///
+/// No git at all - a source tarball - falls back to Cargo.toml, which for a
+/// tarball cut from a tag is the right answer anyway. A shallow clone has no
+/// tags to describe from and gets a bare commit hash, which is why the two
+/// workflows that build installers check out full history.
+fn stamp_version() {
+    let pkg = std::env::var("CARGO_PKG_VERSION").expect("CARGO_PKG_VERSION");
+    let version = match git(&["describe", "--tags", "--always", "--dirty"]) {
+        Some(described) if described == format!("v{pkg}") => pkg,
+        Some(described) => described,
+        None => pkg,
+    };
+    println!("cargo:rustc-env=PTT_VERSION={version}");
+
+    // Re-describe when the answer can have changed: a commit or a checkout
+    // (HEAD, the refs), a new tag (the refs again), staging (the index), or an
+    // edit to the source, which is the edit that makes a build dirty. Edits
+    // anywhere else do not restamp, so a build can claim to be clean with a
+    // README change pending - but a README change does not change the exe.
+    // Only paths that exist: cargo treats a missing one as changed on every
+    // build, and `packed-refs` routinely does not exist.
+    let (Some(git_dir), Some(common_dir)) = (
+        git(&["rev-parse", "--git-dir"]),
+        git(&["rev-parse", "--git-common-dir"]),
+    ) else {
+        return;
+    };
+    let watched = [
+        format!("{git_dir}/HEAD"),
+        format!("{git_dir}/index"),
+        format!("{common_dir}/refs"),
+        format!("{common_dir}/packed-refs"),
+        "src".to_string(),
+    ];
+    for path in watched {
+        if std::path::Path::new(&path).exists() {
+            println!("cargo:rerun-if-changed={path}");
+        }
+    }
+}
+
+/// One line of git output, or None if there is no git or it had nothing to say.
+///
+/// `--no-optional-locks` because `describe --dirty` otherwise refreshes the
+/// index as it checks, which rewrites the very file watched above - and a
+/// build script that touches its own trigger runs again on every build.
+fn git(args: &[&str]) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .arg("--no-optional-locks")
+        .args(args)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let line = String::from_utf8(out.stdout).ok()?.trim().to_string();
+    (!line.is_empty()).then_some(line)
 }
 
 /// The whole `.res`: one `RT_ICON` per size, then the group tying them

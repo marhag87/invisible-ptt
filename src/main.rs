@@ -424,7 +424,14 @@ fn main() {
     let log_path = path.with_file_name("invisible-ptt.log");
     log::init(&log_path);
     // The log outlives any one session, so mark where this one starts.
-    log!("--- invisible-ptt starting on {}", path.display());
+    // With the build in it, because the log is also the only way to tell the
+    // installed copy from a dev build run out of target\release - see
+    // `stamp_version` in build.rs.
+    log!(
+        "--- invisible-ptt {} starting on {}",
+        env!("PTT_VERSION"),
+        path.display()
+    );
 
     if !path.exists() {
         match create_config(&path) {

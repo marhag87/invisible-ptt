@@ -118,6 +118,14 @@ notification-area icon whose menu is the entire user interface (`src/tray.rs`).
   `invisible-ptt.log` beside the config. That file is now the only account of
   what happened overnight. The attribute is `cfg`-gated off under `test`, or it
   would silence the test harness too.
+- **Each session's first log line names the build**: `--- invisible-ptt
+  <version> starting on <config>`. A release (clean, exactly on tag
+  `v<Cargo.toml version>`) prints `0.3.1`; anything else prints `git
+  describe`, e.g. `v0.3.1-2-g8ab6525-dirty`. `build.rs` stamps it as
+  `PTT_VERSION`, re-describing on commits, tags, staging and edits under
+  `src/` - edits elsewhere do not mark it dirty. The installer and release
+  workflows check out with `fetch-depth: 0`, because a shallow clone has no
+  tags and would stamp a bare hash.
 - **Startup failures get a message box** (`platform::error_box`). Without one a
   bad config just means the app never appears. The *mouse* is the exception:
   `connect_when_available()` waits for it instead of dying, because at sign-in
